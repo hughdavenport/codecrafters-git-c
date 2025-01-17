@@ -1,4 +1,5 @@
 #include <fcntl.h>
+#include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -68,6 +69,68 @@ int init_command(int argc, char *argv[]) {
 }
 
 int cat_file_command(int argc, char *argv[]) {
+    bool pretty = false; (void)pretty;
+    if (argc <= 0) {
+        // FIXME display error
+        return 1;
+    }
+    char *arg = ARG();
+    if (strcmp(arg, "-p") == 0) {
+        pretty = true;
+        if (argc <= 0) {
+            // FIXME display error
+            return 1;
+        }
+        arg = ARG();
+    }
+    // FIXME check valid hash
+    if (strlen(arg) != 40) {
+
+        // FIXME display error
+        return 1;
+    }
+
+    // FIXME check in right dir
+    char *object_path = malloc(55);
+    if (object_path == NULL) {
+        fprintf(stderr, "Ran out of memory creating object path\n");
+        return 1;
+    }
+    char *objects_dir = ".git/objects";
+    if (sprintf(object_path, "%s/xx/%38s", objects_dir, arg + 2) == -1) {
+        fprintf(stderr, "Ran out of memory creating object path\n");
+        return 1;
+    }
+    object_path[strlen(objects_dir)+1] = arg[0];
+    object_path[strlen(objects_dir)+2] = arg[1];
+
+    fprintf(stderr, "Failed to open object file %s: %s\n", object_path, strerror(errno));
+    int object_fd = open(object_path, O_RDONLY);
+    if (object_fd == -1) {
+        fprintf(stderr, "Failed to open object file %s: %s\n", object_path, strerror(errno));
+        return 1;
+    }
+#define BUF_SIZE 4096
+    char buf[BUF_SIZE];
+    while (true) {
+        ssize_t bytes = read(object_fd, buf, BUF_SIZE);
+        if (bytes == 0) break;
+        if (bytes == -1) {
+            fprintf(stderr, "IO error reading object file %s: %s\n", object_path, strerror(errno));
+            return 1;
+        }
+        char *p = buf;
+        while (bytes > 0) {
+            ssize_t write_ret = write(STDOUT_FILENO, p, bytes);
+            if (write_ret <= 0) {
+                fprintf(stderr, "IO error reading object file %s: %s\n", object_path, strerror(errno));
+                return 1;
+            }
+            p += write_ret;
+            bytes -= write_ret;
+        }
+    }
+
     return 0;
 }
 
