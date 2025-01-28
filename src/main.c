@@ -1,3 +1,4 @@
+#include <ctype.h>
 #include <fcntl.h>
 #include <stdbool.h>
 #include <stdio.h>
@@ -8,7 +9,36 @@
 #include <unistd.h>
 #include <errno.h>
 
+#define ZLIB_IMPLEMENTATION
+#include "zlib.h"
 #define ARG() *argv++; argc--
+
+bool file_read_contents(const char *filename, uint8_t **data, long *size) {
+    bool ret = true;
+#define return_defer(code) do { ret = (code); goto defer; } while (0);
+#define expect(expr) if (!(expr)) return_defer(false)
+    FILE *file = NULL;
+    file = fopen(filename, "rb");
+    expect(file != NULL);
+
+    expect(fseek(file, 0L, SEEK_END) != -1);
+    *size = ftell(file);
+    expect(*size != -1);
+    expect(fseek(file, 0L, SEEK_SET) != -1);
+
+    *data = malloc(*size);
+    expect(*data != NULL);
+    expect(fread(*data, *size, 1, file) == 1);
+
+#undef return_defer
+#undef expect
+defer:
+    if (file) fclose(file);
+    if (!ret) {
+        if (data) free(data);
+    }
+    return ret;
+}
 
 int init_command(int argc, char *argv[]) {
     int dir_fd = AT_FDCWD;
@@ -69,6 +99,11 @@ int init_command(int argc, char *argv[]) {
 }
 
 int cat_file_command(int argc, char *argv[]) {
+    int ret = 0;
+    uint8_t *filedata = NULL;
+    char *object_path = NULL;
+    zlib_data_array decompressed = {0};
+#define return_defer(code) do { ret = (code); goto defer; } while (0);
     bool pretty = false; (void)pretty;
     if (argc <= 0) {
         // FIXME display error
@@ -87,51 +122,62 @@ int cat_file_command(int argc, char *argv[]) {
     if (strlen(arg) != 40) {
 
         // FIXME display error
-        return 1;
+        return_defer(1);
     }
 
     // FIXME check in right dir
-    char *object_path = malloc(55);
+    object_path = malloc(55);
     if (object_path == NULL) {
         fprintf(stderr, "Ran out of memory creating object path\n");
-        return 1;
+        return_defer(1);
     }
     char *objects_dir = ".git/objects";
     if (sprintf(object_path, "%s/xx/%38s", objects_dir, arg + 2) == -1) {
         fprintf(stderr, "Ran out of memory creating object path\n");
-        return 1;
+        return_defer(1);
     }
     object_path[strlen(objects_dir)+1] = arg[0];
     object_path[strlen(objects_dir)+2] = arg[1];
 
-    fprintf(stderr, "Failed to open object file %s: %s\n", object_path, strerror(errno));
-    int object_fd = open(object_path, O_RDONLY);
-    if (object_fd == -1) {
-        fprintf(stderr, "Failed to open object file %s: %s\n", object_path, strerror(errno));
-        return 1;
-    }
-#define BUF_SIZE 4096
-    char buf[BUF_SIZE];
-    while (true) {
-        ssize_t bytes = read(object_fd, buf, BUF_SIZE);
-        if (bytes == 0) break;
-        if (bytes == -1) {
-            fprintf(stderr, "IO error reading object file %s: %s\n", object_path, strerror(errno));
-            return 1;
-        }
-        char *p = buf;
-        while (bytes > 0) {
-            ssize_t write_ret = write(STDOUT_FILENO, p, bytes);
-            if (write_ret <= 0) {
-                fprintf(stderr, "IO error reading object file %s: %s\n", object_path, strerror(errno));
-                return 1;
-            }
-            p += write_ret;
-            bytes -= write_ret;
-        }
+    long size = 0;
+    if (!file_read_contents(object_path, &filedata, &size)) {
+        fprintf(stderr, "Couldn't read object file at '%s'\n", object_path);
+        return_defer(1);
     }
 
-    return 0;
+    if (!zlib_decompress(filedata, size, &decompressed)) {
+        fprintf(stderr, "Couldn't decompress object file at '%s'\n", object_path);
+        return_defer(1);
+    }
+
+    if (decompressed.size < 5) {
+        fprintf(stderr, "Decompressed data too small\n");
+        return_defer(1);
+    }
+    if (strncmp((char*)decompressed.data, "blob ", 5) != 0) {
+        fprintf(stderr, "Decompressed data is not a valid blob object\n");
+        return_defer(1);
+    }
+    if (!isdigit((char)decompressed.data[5])) {
+        fprintf(stderr, "Decompressed data is not a valid blob object\n");
+        return_defer(1);
+    }
+
+    char *blob_head_end = NULL;
+    long blob_size = strtol((char*)decompressed.data + 5, &blob_head_end, 10);
+    if (*blob_head_end != '\0') {
+        fprintf(stderr, "Invalid blob size\n");
+        return_defer(1);
+    }
+    assert(blob_size == (char*)(decompressed.data + decompressed.size) - blob_head_end - 1);
+    fwrite(blob_head_end + 1, 1, blob_size, stdout);
+#undef return_defer
+#undef expect
+defer:
+    if (filedata != NULL) free(filedata);
+    if (object_path != NULL) free(object_path);
+    if (decompressed.data) free(decompressed.data);
+    return ret;
 }
 
 int main(int argc, char *argv[]) {
