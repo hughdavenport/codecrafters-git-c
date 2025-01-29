@@ -35,7 +35,7 @@ bool file_read_contents(const char *filename, uint8_t **data, long *size) {
 defer:
     if (file) fclose(file);
     if (!ret) {
-        if (data) free(data);
+        if (*data) free(*data);
     }
     return ret;
 }
@@ -102,7 +102,7 @@ int cat_file_command(int argc, char *argv[]) {
     int ret = 0;
     uint8_t *filedata = NULL;
     char *object_path = NULL;
-    zlib_data_array decompressed = {0};
+    zlib_context ctx = {0};
 #define return_defer(code) do { ret = (code); goto defer; } while (0);
     bool pretty = false; (void)pretty;
     if (argc <= 0) {
@@ -145,38 +145,69 @@ int cat_file_command(int argc, char *argv[]) {
         return_defer(1);
     }
 
-    if (!zlib_decompress(filedata, size, &decompressed)) {
+    for (size_t i = 0; i < size; i ++) {
+        if (i % 16 == 0) fprintf(stderr, "%08lx:", i);
+
+        if (i % 2 == 0) fprintf(stderr, " ");
+        switch (filedata[i]) {
+            case 0x00:
+                fprintf(stderr, "\033[1;37m");
+                break;
+            case '\t':
+            case '\n':
+            case '\r':
+                fprintf(stderr, "\033[1;33m");
+                break;
+
+            default:
+                if (isprint(filedata[i])) {
+                    fprintf(stderr, "\033[1;32m");
+                } else {
+                    fprintf(stderr, "\033[1;31m");
+                }
+        }
+        fprintf(stderr, "%02x\033[0m", filedata[i]);
+        if (i % 16 == 15) fprintf(stderr, "\n");
+    }
+    fprintf(stderr, "\n");
+
+    ctx.deflate.bits.data = filedata;
+    ctx.deflate.bits.size = size;
+
+    if (!zlib_decompress(&ctx)) {
         fprintf(stderr, "Couldn't decompress object file at '%s'\n", object_path);
         return_defer(1);
     }
 
-    if (decompressed.size < 5) {
+    if (ctx.deflate.decompressed.size < 5) {
         fprintf(stderr, "Decompressed data too small\n");
         return_defer(1);
     }
-    if (strncmp((char*)decompressed.data, "blob ", 5) != 0) {
+    if (strncmp((char*)ctx.deflate.decompressed.data, "blob ", 5) != 0) {
         fprintf(stderr, "Decompressed data is not a valid blob object\n");
         return_defer(1);
     }
-    if (!isdigit((char)decompressed.data[5])) {
+    if (!isdigit((char)ctx.deflate.decompressed.data[5])) {
         fprintf(stderr, "Decompressed data is not a valid blob object\n");
         return_defer(1);
     }
 
     char *blob_head_end = NULL;
-    long blob_size = strtol((char*)decompressed.data + 5, &blob_head_end, 10);
+    long blob_size = strtol((char*)ctx.deflate.decompressed.data + 5, &blob_head_end, 10);
     if (*blob_head_end != '\0') {
         fprintf(stderr, "Invalid blob size\n");
         return_defer(1);
     }
-    assert(blob_size == (char*)(decompressed.data + decompressed.size) - blob_head_end - 1);
+    INFO("blob_size == %ld\n", blob_size);
+    INFO("size from end of blob == %ld\n", (char*)(ctx.deflate.decompressed.data + ctx.deflate.decompressed.size) - blob_head_end - 1);
+    assert(blob_size == (char*)(ctx.deflate.decompressed.data + ctx.deflate.decompressed.size) - blob_head_end - 1);
     fwrite(blob_head_end + 1, 1, blob_size, stdout);
 #undef return_defer
 #undef expect
 defer:
     if (filedata != NULL) free(filedata);
     if (object_path != NULL) free(object_path);
-    if (decompressed.data) free(decompressed.data);
+    if (ctx.deflate.decompressed.data) free(ctx.deflate.decompressed.data);
     return ret;
 }
 
