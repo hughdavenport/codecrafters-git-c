@@ -145,32 +145,7 @@ int cat_file_command(int argc, char *argv[]) {
         return_defer(1);
     }
 
-    for (size_t i = 0; i < size; i ++) {
-        if (i % 16 == 0) fprintf(stderr, "%08lx:", i);
-
-        if (i % 2 == 0) fprintf(stderr, " ");
-        switch (filedata[i]) {
-            case 0x00:
-                fprintf(stderr, "\033[1;37m");
-                break;
-            case '\t':
-            case '\n':
-            case '\r':
-                fprintf(stderr, "\033[1;33m");
-                break;
-
-            default:
-                if (isprint(filedata[i])) {
-                    fprintf(stderr, "\033[1;32m");
-                } else {
-                    fprintf(stderr, "\033[1;31m");
-                }
-        }
-        fprintf(stderr, "%02x\033[0m", filedata[i]);
-        if (i % 16 == 15) fprintf(stderr, "\n");
-    }
-    fprintf(stderr, "\n");
-
+    hexdump(filedata, size);
     ctx.deflate.bits.data = filedata;
     ctx.deflate.bits.size = size;
 
