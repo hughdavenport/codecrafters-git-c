@@ -86,6 +86,7 @@ void hexdump(uint8_t *data, size_t len);
 #include <assert.h>
 #include <string.h>
 #include <ctype.h>
+#include <arpa/inet.h>
 
 #ifndef UNREACHABLE
 #define UNREACHABLE() do { fprintf(stderr, "%s:%d: UNREACHABLE\n", __FILE__, __LINE__); fflush(stderr); abort(); } while (0)
@@ -320,10 +321,12 @@ bool _deflate_uncompressed(deflate_context *ctx) {
         case DEFLATE_UNCOMPRESSED_DATA: {
             assert(ctx->bits.index == 0);
             size_t bytes = ctx->saved >= DEFLATE_BYTES(ctx) ? DEFLATE_BYTES(ctx) : ctx->saved;
-            DEFLATE_DECOMPRESS_APPEND_BYTES(ctx, ctx->bits.data, bytes);
-            ctx->bits.data += bytes;
-            ctx->bits.size -= bytes;
-            ctx->saved -= bytes;
+            if (bytes > 0) {
+                DEFLATE_DECOMPRESS_APPEND_BYTES(ctx, ctx->bits.data, bytes);
+                ctx->bits.data += bytes;
+                ctx->bits.size -= bytes;
+                ctx->saved -= bytes;
+            }
             if (ctx->saved == 0) {
                 ctx->state = DEFLATE_FINISHED;
                 return true;
@@ -389,31 +392,27 @@ int _deflate_fixed_compression_length_extra(deflate_context *ctx) {
     assert(code >= 265 && code < 285);
     if (code < 269) {
         uint8_t offset = 1;
-        uint16_t next = deflate_next_bits(ctx, offset);
+        uint16_t next = deflate_next_bits_rev(ctx, offset);
         if (next == (uint16_t)EOF) return EOF;
         return 11 + ((code - 265) << offset) + next;
     } else if (code < 273) {
-        // FIXME: Does this need to be _rev
         uint8_t offset = 2;
-        uint16_t next = deflate_next_bits(ctx, offset);
+        uint16_t next = deflate_next_bits_rev(ctx, offset);
         if (next == (uint16_t)EOF) return EOF;
         return 19 + ((code - 269) << offset) + next;
     } else if (code < 277) {
-        // FIXME: Does this need to be _rev
         uint8_t offset = 3;
-        uint16_t next = deflate_next_bits(ctx, offset);
+        uint16_t next = deflate_next_bits_rev(ctx, offset);
         if (next == (uint16_t)EOF) return EOF;
         return 35 + ((code - 273) << offset) + next;
     } else if (code < 281) {
-        // FIXME: Does this need to be _rev
         uint8_t offset = 4;
-        uint16_t next = deflate_next_bits(ctx, offset);
+        uint16_t next = deflate_next_bits_rev(ctx, offset);
         if (next == (uint16_t)EOF) return EOF;
         return 67 + ((code - 277) << offset) + next;
     } else if (code < 285) {
-        // FIXME: Does this need to be _rev
         uint8_t offset = 5;
-        uint16_t next = deflate_next_bits(ctx, offset);
+        uint16_t next = deflate_next_bits_rev(ctx, offset);
         if (next == (uint16_t)EOF) return EOF;
         return 131 + ((code - 281) << offset) + next;
     }
@@ -430,7 +429,7 @@ int _deflate_fixed_compression_dist_extra(deflate_context *ctx) {
     // RFC 1951 - 3.2.5
     if (code < 6) {
         uint8_t offset = 1;
-        uint16_t next = deflate_next_bits(ctx, offset);
+        uint16_t next = deflate_next_bits_rev(ctx, offset);
         if (next == (uint16_t)EOF) return EOF;
         return 5 + ((code - 4) << offset) + next;
     } else if (code < 8) {
@@ -749,7 +748,8 @@ bool deflate_block(deflate_context *ctx) {
 }
 
 bool deflate(deflate_context *ctx) {
-    while (ctx->state != DEFLATE_FINISHED) {
+    while (!ctx->last) {
+        if (ctx->state == DEFLATE_FINISHED) ctx->state = DEFLATE_HEADER;
         if (!deflate_block(ctx)) return false;
     }
     return true;
@@ -761,6 +761,7 @@ bool zlib_decompress(zlib_context *ctx) {
         _Static_assert(ZLIB_ERROR == 5, "States have changed. May need handling here");
         switch (ctx->state) {
             case ZLIB_HEADER: {
+                DEFLATE_CLEAR_BITS(&ctx->deflate);
                 if (DEFLATE_BYTES(&ctx->deflate) < 2) return false;
 
                 uint8_t cmf = deflate_next_bytes(&ctx->deflate, 1);
@@ -807,7 +808,15 @@ bool zlib_decompress(zlib_context *ctx) {
                     s2 = ((uint32_t)s2 + s1) % 65521;
                 }
 
-                // FIXME check adler-32 code
+                if (DEFLATE_BYTES(&ctx->deflate) < 4) return false;
+
+                DEFLATE_CLEAR_BITS(&ctx->deflate);
+                uint32_t adler = deflate_next_bytes(&ctx->deflate, 4);
+                if (htonl(adler) != (uint32_t)s2 * 65536 + (uint32_t)s1) {
+                    ctx->state = ZLIB_ERROR;
+                    return false;
+                }
+                ctx->state = ZLIB_FINISHED;
             };
                 // fall through
             case ZLIB_FINISHED: return true;
