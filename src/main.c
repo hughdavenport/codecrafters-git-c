@@ -145,7 +145,8 @@ int cat_file_command(int argc, char *argv[]) {
         return_defer(1);
     }
 
-    hexdump(filedata, size);
+    /* hexdump(filedata, size); */
+
     ctx.deflate.bits.data = filedata;
     ctx.deflate.bits.size = size;
 
@@ -173,8 +174,6 @@ int cat_file_command(int argc, char *argv[]) {
         fprintf(stderr, "Invalid blob size\n");
         return_defer(1);
     }
-    INFO("blob_size == %ld\n", blob_size);
-    INFO("size from end of blob == %ld\n", (char*)(ctx.deflate.decompressed.data + ctx.deflate.decompressed.size) - blob_head_end - 1);
     assert(blob_size == (char*)(ctx.deflate.decompressed.data + ctx.deflate.decompressed.size) - blob_head_end - 1);
     fwrite(blob_head_end + 1, 1, blob_size, stdout);
 #undef return_defer
