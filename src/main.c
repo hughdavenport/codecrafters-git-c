@@ -9,6 +9,8 @@
 #include <unistd.h>
 #include <errno.h>
 
+#define SHA1_IMPLEMENTATION
+#include "sha1.h"
 #define ZLIB_IMPLEMENTATION
 #include "zlib.h"
 #define ARG() *argv++; argc--
@@ -107,14 +109,14 @@ int cat_file_command(int argc, char *argv[]) {
     bool pretty = false; (void)pretty;
     if (argc <= 0) {
         // FIXME display error
-        return 1;
+        return_defer(1);
     }
     char *arg = ARG();
     if (strcmp(arg, "-p") == 0) {
         pretty = true;
         if (argc <= 0) {
             // FIXME display error
-            return 1;
+            return_defer(1);
         }
         arg = ARG();
     }
@@ -177,11 +179,121 @@ int cat_file_command(int argc, char *argv[]) {
     assert(blob_size == (char*)(ctx.deflate.decompressed.data + ctx.deflate.decompressed.size) - blob_head_end - 1);
     fwrite(blob_head_end + 1, 1, blob_size, stdout);
 #undef return_defer
-#undef expect
 defer:
     if (filedata != NULL) free(filedata);
     if (object_path != NULL) free(object_path);
     if (ctx.deflate.decompressed.data) free(ctx.deflate.decompressed.data);
+    return ret;
+}
+
+int hash_object_command(int argc, char *argv[]) {
+    int ret = 0;
+    FILE *file = NULL;
+    uint8_t *filedata = NULL;
+    uint8_t *blob = NULL;
+    int dir_fd = AT_FDCWD;
+    int blob_fd = -1;
+#define return_defer(code) do { ret = (code); goto defer; } while (0);
+    bool writeblob = false;
+    char *filename = NULL;
+    while (argc > 0) {
+        char *arg = ARG();
+        if (strcmp(arg, "-w") == 0) {
+            writeblob = true;
+        } else {
+            filename = arg;
+        }
+    }
+
+    if (filename == NULL) {
+        // FIXME display error
+        return_defer(1);
+    }
+
+    long size = 0;
+    if (!file_read_contents(filename, &filedata, &size)) {
+        // FIXME display error
+        return_defer(1);
+    }
+
+    long bloblen = 0;
+    long tmp = size;
+    while (tmp != 0) {
+        bloblen ++;
+        tmp /= 10;
+    }
+
+    // blob SP bloblen NULL filedata
+    long blobsize = size + bloblen + 6;
+    blob = malloc(blobsize);
+    if (blob == NULL) {
+        // FIXME display error
+        return_defer(1);
+    }
+
+    long headersize = snprintf((char *)blob, blobsize, "blob %ld", size);
+    assert(headersize == bloblen + 5);
+    assert(blob[headersize] == '\0');
+
+    memcpy(blob + headersize + 1, filedata, size);
+
+    uint8_t result[SHA1_DIGEST_BYTE_LENGTH];
+
+    if (!sha1_digest(blob, blobsize, result)) {
+        // FIXME display error
+        return_defer(1);
+    }
+
+    if (writeblob) {
+        // mkdir .git/objects
+        // TODO different git dir locations
+        // TODO find parent dir if within the git file system
+        if ((mkdirat(dir_fd, ".git", 0755) == -1 && errno != EEXIST) ||
+            (mkdirat(dir_fd, ".git/objects", 0755) == -1 && errno != EEXIST)) {
+            // FIXME display error
+            return_defer(1);
+        }
+        int fd = openat(dir_fd, ".git/objects", O_DIRECTORY);
+        if (dir_fd != AT_FDCWD) close(dir_fd);
+        dir_fd = fd;
+
+        char byte1[3];
+        assert(snprintf(byte1, 3, "%02x", result[0]) == 2);
+        if (mkdirat(dir_fd, byte1, 0755) == -1 && errno != EEXIST) {
+            // FIXME display error
+            return_defer(1);
+        }
+        fd = openat(dir_fd, byte1, O_DIRECTORY);
+        if (dir_fd != AT_FDCWD) close(dir_fd);
+        dir_fd = fd;
+
+        char rest[2 * (SHA1_DIGEST_BYTE_LENGTH - 1) + 1];
+        for (int idx = 1; idx < SHA1_DIGEST_BYTE_LENGTH; idx ++) {
+            assert(snprintf(rest + (idx - 1) * 2, 3, "%02x", result[idx]) == 2);
+        }
+
+        int blob_fd = openat(dir_fd, rest, O_CREAT|O_TRUNC|O_WRONLY, 0644);
+        if (blob_fd == -1) {
+            // FIXME display error
+            return_defer(1);
+        }
+
+        // FIXME compress the thing
+        assert(write(blob_fd, blob, blobsize) == blobsize);
+    }
+
+    for (int idx = 0; idx < SHA1_DIGEST_BYTE_LENGTH; idx ++) {
+        printf("%02x", result[idx]);
+    }
+    printf("\n");
+
+#undef return_defer
+defer:
+    if (file != NULL) fclose(file);
+    if (filedata != NULL) free(filedata);
+    if (blob != NULL) free(blob);
+    if (dir_fd != AT_FDCWD) close(dir_fd);
+    if (blob_fd != -1) close(blob_fd);
     return ret;
 }
 
@@ -203,6 +315,8 @@ int main(int argc, char *argv[]) {
         return init_command(argc, argv);
     } else if (strcmp(command, "cat-file") == 0) {
         return cat_file_command(argc, argv);
+    } else if (strcmp(command, "hash-object") == 0) {
+        return hash_object_command(argc, argv);
     } else {
         fprintf(stderr, "Unknown command %s\n", command);
         return 1;
