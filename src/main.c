@@ -42,7 +42,7 @@ defer:
     return ret;
 }
 
-int init_command(int argc, char *argv[]) {
+int init_command(const char *program, int argc, char *argv[]) {
     int dir_fd = AT_FDCWD;
     char *dir = NULL;
     if (argc > 0) {
@@ -100,31 +100,48 @@ int init_command(int argc, char *argv[]) {
     return 0;
 }
 
-int cat_file_command(int argc, char *argv[]) {
+int cat_file_command(const char *program, int argc, char *argv[]) {
     int ret = 0;
     uint8_t *filedata = NULL;
     char *object_path = NULL;
     zlib_context ctx = {0};
 #define return_defer(code) do { ret = (code); goto defer; } while (0);
-    bool pretty = false; (void)pretty;
+#define usage() do { \
+    fprintf(stderr, "usage: %s cat-file -p <sha1-hash>\n", program); \
+} while (0)
+
     if (argc <= 0) {
-        // FIXME display error
+        usage();
         return_defer(1);
     }
-    char *arg = ARG();
-    if (strcmp(arg, "-p") == 0) {
-        pretty = true;
-        if (argc <= 0) {
-            // FIXME display error
+    bool pretty = false;
+    char *hash = NULL;
+    while (argc > 0) {
+        char *arg = ARG();
+        if (strcmp(arg, "-p") == 0) {
+            pretty = true;
+        } else {
+            hash = arg;
+        }
+    }
+
+    if (!pretty) {
+        usage();
+        return_defer(1);
+    }
+    if (hash == NULL) {
+        usage();
+        return_defer(1);
+    }
+    if (strlen(hash) != SHA1_DIGEST_BYTE_LENGTH) {
+        fprintf(stderr, "ERROR: %s is not a valid SHA-1 hash\n", hash);
+        return_defer(1);
+    }
+    for (size_t i = 0; i < SHA1_DIGEST_BYTE_LENGTH; i ++) {
+        if (isxdigit(hash[i]) == 0) {
+            fprintf(stderr, "ERROR: %s is not a valid SHA-1 hash\n", hash);
             return_defer(1);
         }
-        arg = ARG();
-    }
-    // FIXME check valid hash
-    if (strlen(arg) != 40) {
-
-        // FIXME display error
-        return_defer(1);
     }
 
     // FIXME check in right dir
@@ -134,12 +151,12 @@ int cat_file_command(int argc, char *argv[]) {
         return_defer(1);
     }
     char *objects_dir = ".git/objects";
-    if (sprintf(object_path, "%s/xx/%38s", objects_dir, arg + 2) == -1) {
+    if (sprintf(object_path, "%s/xx/%38s", objects_dir, hash + 2) == -1) {
         fprintf(stderr, "Ran out of memory creating object path\n");
         return_defer(1);
     }
-    object_path[strlen(objects_dir)+1] = arg[0];
-    object_path[strlen(objects_dir)+2] = arg[1];
+    object_path[strlen(objects_dir)+1] = hash[0];
+    object_path[strlen(objects_dir)+2] = hash[1];
 
     long size = 0;
     if (!file_read_contents(object_path, &filedata, &size)) {
@@ -178,6 +195,8 @@ int cat_file_command(int argc, char *argv[]) {
     }
     assert(blob_size == (char*)(ctx.deflate.out.data + ctx.deflate.out.size) - blob_head_end - 1);
     fwrite(blob_head_end + 1, 1, blob_size, stdout);
+
+#undef usage
 #undef return_defer
 defer:
     if (filedata != NULL) free(filedata);
@@ -186,7 +205,7 @@ defer:
     return ret;
 }
 
-int hash_object_command(int argc, char *argv[]) {
+int hash_object_command(const char *program, int argc, char *argv[]) {
     int ret = 0;
     FILE *file = NULL;
     uint8_t *filedata = NULL;
@@ -324,12 +343,13 @@ int main(int argc, char *argv[]) {
     const char *command = ARG();
 
     if (strcmp(command, "init") == 0) {
-        return init_command(argc, argv);
+        return init_command(program, argc, argv);
     } else if (strcmp(command, "cat-file") == 0) {
-        return cat_file_command(argc, argv);
+        return cat_file_command(program, argc, argv);
     } else if (strcmp(command, "hash-object") == 0) {
-        return hash_object_command(argc, argv);
+        return hash_object_command(program, argc, argv);
     } else {
+        // FIXME work out similar commands
         fprintf(stderr, "Unknown command %s\n", command);
         return 1;
     }
