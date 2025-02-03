@@ -42,6 +42,53 @@ defer:
     return ret;
 }
 
+bool read_object(char *hash, uint8_t **data, long *size) {
+    bool ret = false;
+    zlib_context ctx = {0};
+    char *object_path = NULL;
+    uint8_t *filedata = NULL;
+#define return_defer(code) do { ret = (code); goto defer; } while (0);
+    object_path = malloc(55);
+    if (object_path == NULL) {
+        fprintf(stderr, "Ran out of memory creating object path\n");
+        return_defer(false);
+    }
+    char *objects_dir = ".git/objects";
+    if (sprintf(object_path, "%s/xx/%38s", objects_dir, hash + 2) == -1) {
+        UNREACHABLE();
+        return_defer(false);
+    }
+    object_path[strlen(objects_dir)+1] = hash[0];
+    object_path[strlen(objects_dir)+2] = hash[1];
+
+    long filesize = 0;
+    // FIXME check in right dir
+    if (!file_read_contents(object_path, &filedata, &filesize)) {
+        fprintf(stderr, "Couldn't read file %s\n", object_path);
+        return_defer(false);
+    }
+
+    /* hexdump(filedata, size); */
+
+    ctx.deflate.bits.data = filedata;
+    ctx.deflate.bits.size = filesize;
+
+    if (!zlib_decompress(&ctx)) {
+        fprintf(stderr, "Couldn't decompress object file %s\n", object_path);
+        return_defer(false);
+    }
+
+    *data = ctx.deflate.out.data;
+    *size = ctx.deflate.out.size;
+    ret = true;
+
+#undef return_defer
+defer:
+    if (filedata) free(filedata);
+    if (object_path) free(object_path);
+    return ret;
+}
+
 int init_command(const char *program, int argc, char *argv[]) {
     int dir_fd = AT_FDCWD;
     char *dir = NULL;
@@ -110,9 +157,7 @@ typedef enum {
 
 int cat_file_command(const char *program, int argc, char *argv[]) {
     int ret = 0;
-    uint8_t *filedata = NULL;
-    char *object_path = NULL;
-    zlib_context ctx = {0};
+    uint8_t *data = NULL;
 #define return_defer(code) do { ret = (code); goto defer; } while (0);
 #define usage() do { \
     fprintf(stderr, "usage: %s cat-file (-p|-t) <sha1-hash>\n", program); \
@@ -172,33 +217,9 @@ int cat_file_command(const char *program, int argc, char *argv[]) {
         }
     }
 
-    object_path = malloc(55);
-    if (object_path == NULL) {
-        fprintf(stderr, "Ran out of memory creating object path\n");
-        return_defer(1);
-    }
-    char *objects_dir = ".git/objects";
-    if (sprintf(object_path, "%s/xx/%38s", objects_dir, hash + 2) == -1) {
-        fprintf(stderr, "Ran out of memory creating object path\n");
-        return_defer(1);
-    }
-    object_path[strlen(objects_dir)+1] = hash[0];
-    object_path[strlen(objects_dir)+2] = hash[1];
-
     long filesize = 0;
-    // FIXME check in right dir
-    if (!file_read_contents(object_path, &filedata, &filesize)) {
-        fprintf(stderr, "Couldn't read object file at '%s'\n", object_path);
-        return_defer(1);
-    }
-
-    /* hexdump(filedata, size); */
-
-    ctx.deflate.bits.data = filedata;
-    ctx.deflate.bits.size = filesize;
-
-    if (!zlib_decompress(&ctx)) {
-        fprintf(stderr, "Couldn't decompress object file at '%s'\n", object_path);
+    if (!read_object(hash, &data, &filesize)) {
+        fprintf(stderr, "Couldn't read object file %s\n", hash);
         return_defer(1);
     }
 
@@ -206,34 +227,32 @@ int cat_file_command(const char *program, int argc, char *argv[]) {
     long size = 0;
     git_object_t object_type = UNKNOWN;
     _Static_assert(NUM_OBJECTS == 3, "Objects have changed. May need handling here");
-    if (strncmp((char*)ctx.deflate.out.data, "blob ", 5) == 0) {
+    if (filesize > 5 && strncmp((char *)data, "blob ", 5) == 0) {
         object_type = BLOB;
         if (showtype) {
             printf("blob\n");
             return_defer(0);
         }
-        size = strtol((char*)ctx.deflate.out.data + 5, &header_end, 10);
-    } else if (strncmp((char*)ctx.deflate.out.data, "tree ", 5) == 0) {
+        size = strtol((char *)data + 5, &header_end, 10);
+    } else if (filesize > 5 && strncmp((char *)data, "tree ", 5) == 0) {
         object_type = TREE;
         if (showtype) {
             printf("tree\n");
             return_defer(0);
         }
-        size = strtol((char*)ctx.deflate.out.data + 5, &header_end, 10);
-    }
-
-    if (object_type == UNKNOWN) {
+        size = strtol((char *)data + 5, &header_end, 10);
+    } else {
         fprintf(stderr, "Decompressed data is not a valid object\n");
         return_defer(1);
     }
 
     if (type != UNKNOWN && object_type != type) {
-        fprintf(stderr, "Invalid type in object file at '%s'\n", object_path);
+        fprintf(stderr, "Invalid type in object file %s\n", hash);
         return_defer(1);
     }
 
     if (*header_end != '\0') {
-        fprintf(stderr, "Invalid size in object file at '%s'\n", object_path);
+        fprintf(stderr, "Invalid size in object file at %s\n", hash);
         return_defer(1);
     }
 
@@ -245,17 +264,17 @@ int cat_file_command(const char *program, int argc, char *argv[]) {
             break;
 
         case BLOB:
-            assert(size == (char*)(ctx.deflate.out.data + ctx.deflate.out.size) - header_end - 1);
+            assert(size == (char*)(data + filesize) - header_end - 1);
             assert(fwrite(header_end + 1, 1, size, stdout) == size);
             break;
 
         case TREE: {
-            assert(size == (char*)(ctx.deflate.out.data + ctx.deflate.out.size) - header_end - 1);
+            assert(size == (char*)(data + filesize) - header_end - 1);
             if (type == TREE) {
                 assert(fwrite(header_end + 1, 1, size, stdout) == size);
                 return_defer(0);
             }
-            char *end = (char *)ctx.deflate.out.data + ctx.deflate.out.size;
+            char *end = (char *)data + filesize;
             char *p = header_end + 1;
             while (p < end) {
                 char *start = p;
@@ -298,9 +317,7 @@ int cat_file_command(const char *program, int argc, char *argv[]) {
 #undef usage
 #undef return_defer
 defer:
-    if (filedata != NULL) free(filedata);
-    if (object_path != NULL) free(object_path);
-    if (ctx.deflate.out.data) free(ctx.deflate.out.data);
+    if (data) free(data);
     return ret;
 }
 
@@ -419,6 +436,7 @@ int hash_object_command(const char *program, int argc, char *argv[]) {
     }
     printf("\n");
 
+#undef usage
 #undef return_defer
 defer:
     if (file != NULL) fclose(file);
@@ -427,6 +445,125 @@ defer:
     if (dir_fd != AT_FDCWD) close(dir_fd);
     if (blob_fd != -1) close(blob_fd);
     if (ctx.deflate.out.data) free(ctx.deflate.out.data);
+    return ret;
+}
+
+int ls_tree_command(const char *program, int argc, char *argv[]) {
+    int ret = 0;
+    uint8_t *data = NULL;
+#define return_defer(code) do { ret = (code); goto defer; } while (0);
+#define usage() do { \
+    fprintf(stderr, "usage: %s ls-tree [--name-only] <sha1-hash>\n", program); \
+} while (0)
+
+    if (argc <= 0) {
+        usage();
+        return_defer(1);
+    }
+
+    bool name_only = false;
+    bool object_only = false;
+    char *hash = NULL;
+    while (argc > 0) {
+        char *arg = ARG();
+        if (strcmp(arg, "--name-only") == 0) {
+            name_only = true;
+        } else if (strcmp(arg, "--object-only") == 0) {
+            object_only = true;
+        } else {
+            // FIXME get the hash from an object name (i.e. HEAD)
+            hash = arg;
+        }
+    }
+
+    if (name_only && object_only) {
+        fprintf(stderr, "ERROR: --name-only is incompatible with --object-only\n");
+        return_defer(1);
+    }
+
+    if (hash == NULL) {
+        usage();
+        return_defer(1);
+    }
+    if (strlen(hash) != 2 * SHA1_DIGEST_BYTE_LENGTH) {
+        fprintf(stderr, "ERROR: %s is not a valid SHA-1 hash\n", hash);
+        return_defer(1);
+    }
+    for (size_t i = 0; i < 2 * SHA1_DIGEST_BYTE_LENGTH; i ++) {
+        if (isxdigit(hash[i]) == 0) {
+            fprintf(stderr, "ERROR: %s is not a valid SHA-1 hash\n", hash);
+            return_defer(1);
+        }
+    }
+
+    long filesize = 0;
+    if (!read_object(hash, &data, &filesize)) {
+        fprintf(stderr, "Couldn't read object file %s\n", hash);
+        return_defer(1);
+    }
+
+    char *header_end = NULL;
+    long size = 0;
+    _Static_assert(NUM_OBJECTS == 3, "Objects have changed. May need handling here");
+    if (filesize <= 5 || strncmp((char *)data, "tree ", 5) != 0) {
+        fprintf(stderr, "Object is not a tree: %s\n", hash);
+        return_defer(1);
+    }
+
+    size = strtol((char *)data + 5, &header_end, 10);
+    if (*header_end != '\0') {
+        fprintf(stderr, "Invalid size in object file at %s\n", hash);
+        return_defer(1);
+    }
+    assert(size == (char*)(data + filesize) - header_end - 1);
+
+    char *end = (char *)data + filesize;
+    char *p = header_end + 1;
+    while (p < end) {
+        char *start = p;
+        while (p < end && *p != '\0') {
+            p ++;
+        }
+        assert(p + SHA1_DIGEST_BYTE_LENGTH + 1 <= end);
+        uint8_t *hash = (uint8_t*)p + 1;
+        p += SHA1_DIGEST_BYTE_LENGTH + 1;
+        char *file = NULL;
+        long mode = strtol(start, &file, 8);
+        assert(*file == ' ');
+        file ++;
+        if (!name_only && !object_only) {
+            printf("%06lo", mode);
+            switch (mode & S_IFMT) {
+                case S_IFDIR: printf(" tree "); break;
+                case S_IFREG: printf(" blob "); break;
+
+                case S_IFBLK:
+                case S_IFCHR:
+                case S_IFIFO:
+                case S_IFLNK:
+                case S_IFSOCK:
+                default:
+                    UNREACHABLE();
+            }
+        }
+        if (!name_only) {
+            for (size_t i = 0; i < SHA1_DIGEST_BYTE_LENGTH; i ++) {
+                printf("%02x", hash[i]);
+            }
+        }
+        if (!name_only && !object_only) {
+            printf("    ");
+        }
+        if (!object_only) {
+            printf("%s", file);
+        }
+        printf("\n");
+    }
+
+#undef usage
+#undef return_defer
+defer:
+    if (data) free(data);
     return ret;
 }
 
@@ -450,6 +587,8 @@ int main(int argc, char *argv[]) {
         return cat_file_command(program, argc, argv);
     } else if (strcmp(command, "hash-object") == 0) {
         return hash_object_command(program, argc, argv);
+    } else if (strcmp(command, "ls-tree") == 0) {
+        return ls_tree_command(program, argc, argv);
     } else {
         // FIXME work out similar commands
         fprintf(stderr, "Unknown command %s\n", command);
