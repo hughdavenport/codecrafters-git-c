@@ -720,7 +720,7 @@ bool deflate_block(deflate_context *ctx) {
 
             case DEFLATE_COMPRESSED_DYNAMIC: {
                                                  /* FIXME make sure this works with state machine */
-                UNIMPLENTED();
+                UNIMPLENTED("Dynamic huffman tree");
                 /* huffman_tree tree = {0}; */
                 /* if (!deflate_dynamic_compression_build_tree(ctx, &tree)) return false; */
 
