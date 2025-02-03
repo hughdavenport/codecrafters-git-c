@@ -100,6 +100,13 @@ int init_command(const char *program, int argc, char *argv[]) {
     return 0;
 }
 
+typedef enum {
+    UNKNOWN,
+    BLOB,
+
+    NUM_OBJECTS, // Keep at end, _Static_assert's depend on it
+} git_object_t;
+
 int cat_file_command(const char *program, int argc, char *argv[]) {
     int ret = 0;
     uint8_t *filedata = NULL;
@@ -107,7 +114,7 @@ int cat_file_command(const char *program, int argc, char *argv[]) {
     zlib_context ctx = {0};
 #define return_defer(code) do { ret = (code); goto defer; } while (0);
 #define usage() do { \
-    fprintf(stderr, "usage: %s cat-file -p <sha1-hash>\n", program); \
+    fprintf(stderr, "usage: %s cat-file (-p|-t) <sha1-hash>\n", program); \
 } while (0)
 
     if (argc <= 0) {
@@ -115,17 +122,35 @@ int cat_file_command(const char *program, int argc, char *argv[]) {
         return_defer(1);
     }
     bool pretty = false;
+    bool showtype = false;
     char *hash = NULL;
+    git_object_t type = UNKNOWN;
     while (argc > 0) {
         char *arg = ARG();
         if (strcmp(arg, "-p") == 0) {
             pretty = true;
+        } else if (strcmp(arg, "-t") == 0) {
+            showtype = true;
         } else {
-            hash = arg;
+            _Static_assert(NUM_OBJECTS == 2, "Objects have changed. May need handling here");
+            if (strcmp(arg, "blob") == 0) {
+                type = BLOB;
+            } else {
+                // FIXME get the hash from an object name (i.e. HEAD)
+                hash = arg;
+            }
         }
     }
 
-    if (!pretty) {
+    if (pretty && showtype) {
+        fprintf(stderr, "ERROR: -p is incompatible with -t\n");
+        return_defer(1);
+    }
+    if (!pretty && !showtype && type == UNKNOWN) {
+        usage();
+        return_defer(1);
+    }
+    if (showtype && type != UNKNOWN) {
         usage();
         return_defer(1);
     }
@@ -133,11 +158,11 @@ int cat_file_command(const char *program, int argc, char *argv[]) {
         usage();
         return_defer(1);
     }
-    if (strlen(hash) != SHA1_DIGEST_BYTE_LENGTH) {
+    if (strlen(hash) != 2 * SHA1_DIGEST_BYTE_LENGTH) {
         fprintf(stderr, "ERROR: %s is not a valid SHA-1 hash\n", hash);
         return_defer(1);
     }
-    for (size_t i = 0; i < SHA1_DIGEST_BYTE_LENGTH; i ++) {
+    for (size_t i = 0; i < 2 * SHA1_DIGEST_BYTE_LENGTH; i ++) {
         if (isxdigit(hash[i]) == 0) {
             fprintf(stderr, "ERROR: %s is not a valid SHA-1 hash\n", hash);
             return_defer(1);
@@ -158,8 +183,8 @@ int cat_file_command(const char *program, int argc, char *argv[]) {
     object_path[strlen(objects_dir)+1] = hash[0];
     object_path[strlen(objects_dir)+2] = hash[1];
 
-    long size = 0;
-    if (!file_read_contents(object_path, &filedata, &size)) {
+    long filesize = 0;
+    if (!file_read_contents(object_path, &filedata, &filesize)) {
         fprintf(stderr, "Couldn't read object file at '%s'\n", object_path);
         return_defer(1);
     }
@@ -167,34 +192,56 @@ int cat_file_command(const char *program, int argc, char *argv[]) {
     /* hexdump(filedata, size); */
 
     ctx.deflate.bits.data = filedata;
-    ctx.deflate.bits.size = size;
+    ctx.deflate.bits.size = filesize;
 
     if (!zlib_decompress(&ctx)) {
         fprintf(stderr, "Couldn't decompress object file at '%s'\n", object_path);
         return_defer(1);
     }
 
-    if (ctx.deflate.out.size < 5) {
-        fprintf(stderr, "Decompressed data too small\n");
-        return_defer(1);
+    _Static_assert(NUM_OBJECTS == 2, "Objects have changed. May need handling here");
+    char *header_end = NULL;
+    long size = 0;
+    git_object_t object_type = UNKNOWN;
+    if (strncmp((char*)ctx.deflate.out.data, "blob ", 5) == 0) {
+        object_type = BLOB;
+        if (showtype) {
+            printf("blob\n");
+            return_defer(0);
+        }
+        size = strtol((char*)ctx.deflate.out.data + 5, &header_end, 10);
     }
-    if (strncmp((char*)ctx.deflate.out.data, "blob ", 5) != 0) {
-        fprintf(stderr, "Decompressed data is not a valid blob object\n");
-        return_defer(1);
-    }
-    if (!isdigit((char)ctx.deflate.out.data[5])) {
-        fprintf(stderr, "Decompressed data is not a valid blob object\n");
+
+    if (object_type == UNKNOWN) {
+        fprintf(stderr, "Decompressed data is not a valid object\n");
         return_defer(1);
     }
 
-    char *blob_head_end = NULL;
-    long blob_size = strtol((char*)ctx.deflate.out.data + 5, &blob_head_end, 10);
-    if (*blob_head_end != '\0') {
-        fprintf(stderr, "Invalid blob size\n");
+    if (type != UNKNOWN && object_type != type) {
+        fprintf(stderr, "Invalid type in object file at '%s'\n", object_path);
         return_defer(1);
     }
-    assert(blob_size == (char*)(ctx.deflate.out.data + ctx.deflate.out.size) - blob_head_end - 1);
-    fwrite(blob_head_end + 1, 1, blob_size, stdout);
+
+    if (*header_end != '\0') {
+        fprintf(stderr, "Invalid size in object file at '%s'\n", object_path);
+        return_defer(1);
+    }
+
+    switch (object_type) {
+        case UNKNOWN:
+            fprintf(stderr, "Decompressed data is not a valid object\n");
+            return_defer(1);
+            break;
+
+        case BLOB:
+            assert(size == (char*)(ctx.deflate.out.data + ctx.deflate.out.size) - header_end - 1);
+            assert(fwrite(header_end + 1, 1, size, stdout) == size);
+            break;
+
+        default:
+            UNREACHABLE();
+            return_defer(1);
+    }
 
 #undef usage
 #undef return_defer
