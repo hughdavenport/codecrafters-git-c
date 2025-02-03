@@ -184,6 +184,10 @@ int cat_file_command(const char *program, int argc, char *argv[]) {
             } else if (strcmp(arg, "tree") == 0) {
                 type = TREE;
             } else {
+                if (*arg == '-') {
+                    usage();
+                    return_defer(1);
+                }
                 // FIXME get the hash from an object name (i.e. HEAD)
                 hash = arg;
             }
@@ -453,7 +457,7 @@ int ls_tree_command(const char *program, int argc, char *argv[]) {
     uint8_t *data = NULL;
 #define return_defer(code) do { ret = (code); goto defer; } while (0);
 #define usage() do { \
-    fprintf(stderr, "usage: %s ls-tree [--name-only] <sha1-hash>\n", program); \
+    fprintf(stderr, "usage: %s ls-tree ([--name-only] | [--object-only]) <sha1-hash>\n", program); \
 } while (0)
 
     if (argc <= 0) {
@@ -471,6 +475,10 @@ int ls_tree_command(const char *program, int argc, char *argv[]) {
         } else if (strcmp(arg, "--object-only") == 0) {
             object_only = true;
         } else {
+            if (*arg == '-') {
+                usage();
+                return_defer(1);
+            }
             // FIXME get the hash from an object name (i.e. HEAD)
             hash = arg;
         }
