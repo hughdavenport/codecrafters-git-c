@@ -103,6 +103,7 @@ int init_command(const char *program, int argc, char *argv[]) {
 typedef enum {
     UNKNOWN,
     BLOB,
+    TREE,
 
     NUM_OBJECTS, // Keep at end, _Static_assert's depend on it
 } git_object_t;
@@ -132,9 +133,11 @@ int cat_file_command(const char *program, int argc, char *argv[]) {
         } else if (strcmp(arg, "-t") == 0) {
             showtype = true;
         } else {
-            _Static_assert(NUM_OBJECTS == 2, "Objects have changed. May need handling here");
+            _Static_assert(NUM_OBJECTS == 3, "Objects have changed. May need handling here");
             if (strcmp(arg, "blob") == 0) {
                 type = BLOB;
+            } else if (strcmp(arg, "tree") == 0) {
+                type = TREE;
             } else {
                 // FIXME get the hash from an object name (i.e. HEAD)
                 hash = arg;
@@ -169,7 +172,6 @@ int cat_file_command(const char *program, int argc, char *argv[]) {
         }
     }
 
-    // FIXME check in right dir
     object_path = malloc(55);
     if (object_path == NULL) {
         fprintf(stderr, "Ran out of memory creating object path\n");
@@ -184,6 +186,7 @@ int cat_file_command(const char *program, int argc, char *argv[]) {
     object_path[strlen(objects_dir)+2] = hash[1];
 
     long filesize = 0;
+    // FIXME check in right dir
     if (!file_read_contents(object_path, &filedata, &filesize)) {
         fprintf(stderr, "Couldn't read object file at '%s'\n", object_path);
         return_defer(1);
@@ -199,14 +202,21 @@ int cat_file_command(const char *program, int argc, char *argv[]) {
         return_defer(1);
     }
 
-    _Static_assert(NUM_OBJECTS == 2, "Objects have changed. May need handling here");
     char *header_end = NULL;
     long size = 0;
     git_object_t object_type = UNKNOWN;
+    _Static_assert(NUM_OBJECTS == 3, "Objects have changed. May need handling here");
     if (strncmp((char*)ctx.deflate.out.data, "blob ", 5) == 0) {
         object_type = BLOB;
         if (showtype) {
             printf("blob\n");
+            return_defer(0);
+        }
+        size = strtol((char*)ctx.deflate.out.data + 5, &header_end, 10);
+    } else if (strncmp((char*)ctx.deflate.out.data, "tree ", 5) == 0) {
+        object_type = TREE;
+        if (showtype) {
+            printf("tree\n");
             return_defer(0);
         }
         size = strtol((char*)ctx.deflate.out.data + 5, &header_end, 10);
@@ -227,6 +237,7 @@ int cat_file_command(const char *program, int argc, char *argv[]) {
         return_defer(1);
     }
 
+    _Static_assert(NUM_OBJECTS == 3, "Objects have changed. May need handling here");
     switch (object_type) {
         case UNKNOWN:
             fprintf(stderr, "Decompressed data is not a valid object\n");
@@ -237,6 +248,47 @@ int cat_file_command(const char *program, int argc, char *argv[]) {
             assert(size == (char*)(ctx.deflate.out.data + ctx.deflate.out.size) - header_end - 1);
             assert(fwrite(header_end + 1, 1, size, stdout) == size);
             break;
+
+        case TREE: {
+            assert(size == (char*)(ctx.deflate.out.data + ctx.deflate.out.size) - header_end - 1);
+            if (type == TREE) {
+                assert(fwrite(header_end + 1, 1, size, stdout) == size);
+                return_defer(0);
+            }
+            char *end = (char *)ctx.deflate.out.data + ctx.deflate.out.size;
+            char *p = header_end + 1;
+            while (p < end) {
+                char *start = p;
+                while (p < end && *p != '\0') {
+                    p ++;
+                }
+                assert(p + SHA1_DIGEST_BYTE_LENGTH + 1 <= end);
+                uint8_t *hash = (uint8_t*)p + 1;
+                p += SHA1_DIGEST_BYTE_LENGTH + 1;
+                char *file = NULL;
+                long mode = strtol(start, &file, 8);
+                assert(*file == ' ');
+                file ++;
+                printf("%06lo", mode);
+                switch (mode & S_IFMT) {
+                    case S_IFDIR: printf(" tree "); break;
+                    case S_IFREG: printf(" blob "); break;
+
+                    case S_IFBLK:
+                    case S_IFCHR:
+                    case S_IFIFO:
+                    case S_IFLNK:
+                    case S_IFSOCK:
+                    default:
+                        UNREACHABLE();
+                }
+                for (size_t i = 0; i < SHA1_DIGEST_BYTE_LENGTH; i ++) {
+                    printf("%02x", hash[i]);
+                }
+                printf("    %s\n", file);
+            }
+        }; break;
+
 
         default:
             UNREACHABLE();
