@@ -261,6 +261,10 @@ int hash_object_command(const char *program, int argc, char *argv[]) {
     int blob_fd = -1;
     zlib_context ctx = {0};
 #define return_defer(code) do { ret = (code); goto defer; } while (0);
+#define usage() do { \
+    fprintf(stderr, "usage: %s hash-object [-w] <filename>\n", program); \
+} while (0)
+
     bool writeblob = false;
     char *filename = NULL;
     while (argc > 0) {
@@ -273,13 +277,13 @@ int hash_object_command(const char *program, int argc, char *argv[]) {
     }
 
     if (filename == NULL) {
-        // FIXME display error
+        usage();
         return_defer(1);
     }
 
     long size = 0;
     if (!file_read_contents(filename, &filedata, &size)) {
-        // FIXME display error
+        fprintf(stderr, "Error reading file %s\n", filename);
         return_defer(1);
     }
 
@@ -294,7 +298,7 @@ int hash_object_command(const char *program, int argc, char *argv[]) {
     long blobsize = size + bloblen + 6;
     blob = malloc(blobsize);
     if (blob == NULL) {
-        // FIXME display error
+        fprintf(stderr, "Ran out of memory creating blob\n");
         return_defer(1);
     }
 
@@ -307,7 +311,7 @@ int hash_object_command(const char *program, int argc, char *argv[]) {
     uint8_t result[SHA1_DIGEST_BYTE_LENGTH];
 
     if (!sha1_digest(blob, blobsize, result)) {
-        // FIXME display error
+        fprintf(stderr, "Error while creating SHA1 digest of blob\n");
         return_defer(1);
     }
 
@@ -317,7 +321,7 @@ int hash_object_command(const char *program, int argc, char *argv[]) {
         // TODO find parent dir if within the git file system
         if ((mkdirat(dir_fd, ".git", 0755) == -1 && errno != EEXIST) ||
             (mkdirat(dir_fd, ".git/objects", 0755) == -1 && errno != EEXIST)) {
-            // FIXME display error
+            fprintf(stderr, "Failed to create directory: .git/objects: %s\n", strerror(errno));
             return_defer(1);
         }
         int fd = openat(dir_fd, ".git/objects", O_DIRECTORY);
@@ -327,7 +331,7 @@ int hash_object_command(const char *program, int argc, char *argv[]) {
         char byte1[3];
         assert(snprintf(byte1, 3, "%02x", result[0]) == 2);
         if (mkdirat(dir_fd, byte1, 0755) == -1 && errno != EEXIST) {
-            // FIXME display error
+            fprintf(stderr, "Failed to create directory: .git/objects/%s: %s\n", byte1, strerror(errno));
             return_defer(1);
         }
         fd = openat(dir_fd, byte1, O_DIRECTORY);
@@ -345,15 +349,14 @@ int hash_object_command(const char *program, int argc, char *argv[]) {
         }
         int blob_fd = openat(dir_fd, rest, O_CREAT|O_TRUNC|O_WRONLY, 0644);
         if (blob_fd == -1) {
-            // FIXME display error
+            fprintf(stderr, "Failed to create object file: .git/objects/%s/%s: %s\n", byte1, rest, strerror(errno));
             return_defer(1);
         }
 
-        // FIXME compress the thing
         ctx.deflate.in.data = blob;
         ctx.deflate.in.size = blobsize;
         if (!zlib_compress(&ctx)) {
-            // FIXME display error
+            fprintf(stderr, "Error while zlib compressing the blob\n");
             return_defer(1);
         }
         assert(write(blob_fd, ctx.deflate.out.data, ctx.deflate.out.size) == ctx.deflate.out.size);
