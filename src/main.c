@@ -157,32 +157,32 @@ int cat_file_command(int argc, char *argv[]) {
         return_defer(1);
     }
 
-    if (ctx.deflate.decompressed.size < 5) {
+    if (ctx.deflate.out.size < 5) {
         fprintf(stderr, "Decompressed data too small\n");
         return_defer(1);
     }
-    if (strncmp((char*)ctx.deflate.decompressed.data, "blob ", 5) != 0) {
+    if (strncmp((char*)ctx.deflate.out.data, "blob ", 5) != 0) {
         fprintf(stderr, "Decompressed data is not a valid blob object\n");
         return_defer(1);
     }
-    if (!isdigit((char)ctx.deflate.decompressed.data[5])) {
+    if (!isdigit((char)ctx.deflate.out.data[5])) {
         fprintf(stderr, "Decompressed data is not a valid blob object\n");
         return_defer(1);
     }
 
     char *blob_head_end = NULL;
-    long blob_size = strtol((char*)ctx.deflate.decompressed.data + 5, &blob_head_end, 10);
+    long blob_size = strtol((char*)ctx.deflate.out.data + 5, &blob_head_end, 10);
     if (*blob_head_end != '\0') {
         fprintf(stderr, "Invalid blob size\n");
         return_defer(1);
     }
-    assert(blob_size == (char*)(ctx.deflate.decompressed.data + ctx.deflate.decompressed.size) - blob_head_end - 1);
+    assert(blob_size == (char*)(ctx.deflate.out.data + ctx.deflate.out.size) - blob_head_end - 1);
     fwrite(blob_head_end + 1, 1, blob_size, stdout);
 #undef return_defer
 defer:
     if (filedata != NULL) free(filedata);
     if (object_path != NULL) free(object_path);
-    if (ctx.deflate.decompressed.data) free(ctx.deflate.decompressed.data);
+    if (ctx.deflate.out.data) free(ctx.deflate.out.data);
     return ret;
 }
 
@@ -193,6 +193,7 @@ int hash_object_command(int argc, char *argv[]) {
     uint8_t *blob = NULL;
     int dir_fd = AT_FDCWD;
     int blob_fd = -1;
+    zlib_context ctx = {0};
 #define return_defer(code) do { ret = (code); goto defer; } while (0);
     bool writeblob = false;
     char *filename = NULL;
@@ -272,6 +273,10 @@ int hash_object_command(int argc, char *argv[]) {
             assert(snprintf(rest + (idx - 1) * 2, 3, "%02x", result[idx]) == 2);
         }
 
+        int unlink_ret = unlinkat(dir_fd, rest, 0);
+        if (unlink_ret == -1) {
+            assert(errno == ENOENT);
+        }
         int blob_fd = openat(dir_fd, rest, O_CREAT|O_TRUNC|O_WRONLY, 0644);
         if (blob_fd == -1) {
             // FIXME display error
@@ -279,7 +284,13 @@ int hash_object_command(int argc, char *argv[]) {
         }
 
         // FIXME compress the thing
-        assert(write(blob_fd, blob, blobsize) == blobsize);
+        ctx.deflate.in.data = blob;
+        ctx.deflate.in.size = blobsize;
+        if (!zlib_compress(&ctx)) {
+            // FIXME display error
+            return_defer(1);
+        }
+        assert(write(blob_fd, ctx.deflate.out.data, ctx.deflate.out.size) == ctx.deflate.out.size);
     }
 
     for (int idx = 0; idx < SHA1_DIGEST_BYTE_LENGTH; idx ++) {
@@ -294,6 +305,7 @@ defer:
     if (blob != NULL) free(blob);
     if (dir_fd != AT_FDCWD) close(dir_fd);
     if (blob_fd != -1) close(blob_fd);
+    if (ctx.deflate.out.data) free(ctx.deflate.out.data);
     return ret;
 }
 

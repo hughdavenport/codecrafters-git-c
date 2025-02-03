@@ -45,7 +45,8 @@ typedef struct {
 typedef struct {
     deflate_state state;
     deflate_bitstream bits;
-    deflate_array decompressed;
+    deflate_array out;
+    deflate_array in;
     uint32_t saved;
     bool last;
 } deflate_context;
@@ -74,7 +75,9 @@ typedef struct {
 } zlib_context;
 
 bool zlib_decompress(zlib_context *ctx);
+bool zlib_compress(zlib_context *ctx);
 
+// FIXME this should be somewhere else
 void hexdump(uint8_t *data, size_t len);
 
 #endif // ZLIB_H
@@ -139,27 +142,27 @@ void hexdump(uint8_t *data, size_t len) {
 
 #define DEFLATE_BYTES(ctx) (ctx)->bits.size
 
-#define DEFLATE_DECOMPRESS_ENSURE(ctx, inc) do { \
-    if ((ctx)->decompressed.size + (inc) > (ctx)->decompressed.capacity) { \
-        size_t new_cap = (ctx)->decompressed.capacity == 0 ? 16 : (ctx)->decompressed.capacity * 2; \
-        while (new_cap < (inc)) new_cap *= 2; \
-        (ctx)->decompressed.data = realloc((ctx)->decompressed.data, new_cap * sizeof((ctx)->decompressed.data[0])); \
-        assert((ctx)->decompressed.data != NULL); \
-        (ctx)->decompressed.capacity = new_cap; \
+#define DEFLATE_ENSURE(ctx, inc) do { \
+    if ((ctx)->out.size + (inc) > (ctx)->out.capacity) { \
+        size_t new_cap = (ctx)->out.capacity == 0 ? 16 : (ctx)->out.capacity * 2; \
+        while (new_cap < (ctx)->out.size + (inc)) new_cap *= 2; \
+        (ctx)->out.data = realloc((ctx)->out.data, new_cap * sizeof((ctx)->out.data[0])); \
+        assert((ctx)->out.data != NULL); \
+        (ctx)->out.capacity = new_cap; \
     } \
 } while (0)
 
-#define DEFLATE_DECOMPRESS_APPEND(ctx, v) do { \
-    DEFLATE_DECOMPRESS_ENSURE(ctx, 1); \
+#define DEFLATE_APPEND(ctx, v) do { \
+    DEFLATE_ENSURE(ctx, 1); \
     /* if (isprint((v))) { INFO("Added '%c'\n", (v)); } else { INFO("Added 0x%02x\n", (v)); } */ \
-    (ctx)->decompressed.data[(ctx)->decompressed.size ++] = (v); \
+    (ctx)->out.data[(ctx)->out.size ++] = (v); \
 } while (0)
 
-#define DEFLATE_DECOMPRESS_APPEND_BYTES(ctx, src, len) do { \
-    DEFLATE_DECOMPRESS_ENSURE(ctx, (len)); \
+#define DEFLATE_APPEND_BYTES(ctx, src, len) do { \
+    DEFLATE_ENSURE(ctx, (len)); \
     /* INFO("Appending bytes\n"); hexdump((src), (len)); */ \
-    memcpy((ctx)->decompressed.data + (ctx)->decompressed.size, (src), (len)); \
-    (ctx)->decompressed.size += (len); \
+    memcpy((ctx)->out.data + (ctx)->out.size, (src), (len)); \
+    (ctx)->out.size += (len); \
 } while (0)
 
 #ifndef PRINT_BITS
@@ -322,7 +325,7 @@ bool _deflate_uncompressed(deflate_context *ctx) {
             assert(ctx->bits.index == 0);
             size_t bytes = ctx->saved >= DEFLATE_BYTES(ctx) ? DEFLATE_BYTES(ctx) : ctx->saved;
             if (bytes > 0) {
-                DEFLATE_DECOMPRESS_APPEND_BYTES(ctx, ctx->bits.data, bytes);
+                DEFLATE_APPEND_BYTES(ctx, ctx->bits.data, bytes);
                 ctx->bits.data += bytes;
                 ctx->bits.size -= bytes;
                 ctx->saved -= bytes;
@@ -509,7 +512,7 @@ bool _deflate_fixed_compression(deflate_context *ctx) {
                 /* INFO("Got code %ld\n", code); */
                 // RFC 1951 - 3.2.5. Compressed blocks (length and distance codes)
                 if (code < 256) {
-                    DEFLATE_DECOMPRESS_APPEND(ctx, (uint8_t)code);
+                    DEFLATE_APPEND(ctx, (uint8_t)code);
                     break;
                 } else if (code == 256) {
                     ctx->state = DEFLATE_FINISHED;
@@ -581,20 +584,20 @@ bool _deflate_fixed_compression(deflate_context *ctx) {
             case DEFLATE_COMPRESSED_FIXED_COPY: {
                 uint16_t len = ctx->saved >> 16;
                 uint32_t dist = ctx->saved & 0xFFFF;
-                assert(dist <= ctx->decompressed.size);
+                assert(dist <= ctx->out.size);
                 /* INFO("Current output at %lx, copying %d bytes from %d back\n", */
-                /*         ctx->decompressed.size, len, dist); */
-                DEFLATE_DECOMPRESS_ENSURE(ctx, len);
+                /*         ctx->out.size, len, dist); */
+                DEFLATE_ENSURE(ctx, len);
                 while (len > dist) {
-                    DEFLATE_DECOMPRESS_APPEND_BYTES(ctx,
-                            ctx->decompressed.data + ctx->decompressed.size - dist,
+                    DEFLATE_APPEND_BYTES(ctx,
+                            ctx->out.data + ctx->out.size - dist,
                             dist);
                     len -= dist;
                     dist *= 2;
                 }
                 if (len > 0) {
-                    DEFLATE_DECOMPRESS_APPEND_BYTES(ctx,
-                            ctx->decompressed.data + ctx->decompressed.size - dist,
+                    DEFLATE_APPEND_BYTES(ctx,
+                            ctx->out.data + ctx->out.size - dist,
                             len);
                 }
 
@@ -774,7 +777,7 @@ bool zlib_decompress(zlib_context *ctx) {
                 if (cinfo != 7) UNIMPLENTED("Reading different window sizes than 32K");
 
                 uint8_t flg = deflate_next_bytes(&ctx->deflate, 1);
-                uint16_t check = (uint16_t)cmf * 256 + (uint8_t)flg;
+                uint16_t check = (uint16_t)cmf * 256 + (uint16_t)flg;
                 assert(check % 31 == 0);
 
                 uint8_t fdict = (flg >> 5) & 0x1;
@@ -803,8 +806,8 @@ bool zlib_decompress(zlib_context *ctx) {
             case ZLIB_ADLER: {
                 uint16_t s1 = 1;
                 uint16_t s2 = 0;
-                for (size_t i = 0; i < ctx->deflate.decompressed.size; i ++) {
-                    s1 = ((uint32_t)s1 + ctx->deflate.decompressed.data[i]) % 65521;
+                for (size_t i = 0; i < ctx->deflate.out.size; i ++) {
+                    s1 = ((uint32_t)s1 + ctx->deflate.out.data[i]) % 65521;
                     s2 = ((uint32_t)s2 + s1) % 65521;
                 }
 
@@ -816,6 +819,87 @@ bool zlib_decompress(zlib_context *ctx) {
                     ctx->state = ZLIB_ERROR;
                     return false;
                 }
+                ctx->state = ZLIB_FINISHED;
+            };
+                // fall through
+            case ZLIB_FINISHED: return true;
+
+            case ZLIB_ERROR:
+            default:
+                UNREACHABLE();
+                break;
+        }
+    }
+    UNREACHABLE();
+    return false;
+}
+
+
+bool inflate(deflate_context *ctx) {
+    // Very naive, don't compress at all
+
+    DEFLATE_APPEND(ctx, 0x01); // final, no compression
+    uint16_t len = ctx->in.size;
+    DEFLATE_APPEND(ctx, (uint8_t)len);
+    DEFLATE_APPEND(ctx, (uint8_t)(len >> 8));
+    DEFLATE_APPEND(ctx, (uint8_t)~len);
+    DEFLATE_APPEND(ctx, (uint8_t)(~len >> 8));
+    DEFLATE_APPEND_BYTES(ctx, ctx->in.data, ctx->in.size);
+    ctx->state = ZLIB_FINISHED;
+    return true;
+}
+
+bool zlib_compress(zlib_context *ctx) {
+    assert(ctx != NULL);
+    for (;;) {
+        _Static_assert(ZLIB_ERROR == 5, "States have changed. May need handling here");
+        switch (ctx->state) {
+            case ZLIB_HEADER: {
+                uint8_t cm = 8;
+                // FIXME maybe use different window size sometimes?
+                uint8_t cinfo = 7;
+                uint8_t cmf = (cinfo & 0xF) << 4 | (cm & 0xF);
+                DEFLATE_APPEND(&ctx->deflate, cmf);
+
+                // FIXME support dictionaries
+                uint8_t fdict = 0;
+                // FIXME support configuring this
+                uint8_t flevel = ZLIB_FASTEST_COMPRESSOR; // ZLIB_DEFAULT_COMPRESSOR;
+
+                uint8_t flg = ((fdict & 0x1) << 5) | ((flevel & 0x3) << 6);
+                uint16_t check = (uint16_t)cmf * 256 + (uint16_t)flg;
+                flg += 31 - (check % 31);
+                DEFLATE_APPEND(&ctx->deflate, flg);
+
+                ctx->state = fdict != 0 ? ZLIB_DICT : ZLIB_DEFLATE;
+            }; break;
+
+            case ZLIB_DICT:
+                UNIMPLENTED("Writing zlib DICTID (see RFC 1950 2.2 Data format)");
+                break; // potentially should fall through?
+
+            case ZLIB_DEFLATE:
+                if (!inflate(&ctx->deflate)) {
+                    if (ctx->deflate.state == DEFLATE_ERROR) {
+                        ctx->state = ZLIB_ERROR;
+                    }
+                    return false;
+                }
+                ctx->state = ZLIB_ADLER;
+                // fall through
+            case ZLIB_ADLER: {
+                uint16_t s1 = 1;
+                uint16_t s2 = 0;
+                for (size_t i = 0; i < ctx->deflate.in.size; i ++) {
+                    s1 = ((uint32_t)s1 + ctx->deflate.in.data[i]) % 65521;
+                    s2 = ((uint32_t)s2 + s1) % 65521;
+                }
+
+                uint32_t adler = ntohl((uint32_t)s2 * 65536 + (uint32_t)s1);
+                DEFLATE_APPEND(&ctx->deflate, adler);
+                DEFLATE_APPEND(&ctx->deflate, adler >> 8);
+                DEFLATE_APPEND(&ctx->deflate, adler >> 16);
+                DEFLATE_APPEND(&ctx->deflate, adler >> 24);
                 ctx->state = ZLIB_FINISHED;
             };
                 // fall through
