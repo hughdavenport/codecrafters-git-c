@@ -8,6 +8,7 @@
 #include <sys/stat.h>
 #include <unistd.h>
 #include <errno.h>
+#include <dirent.h>
 
 #define SHA1_IMPLEMENTATION
 #include "sha1.h"
@@ -15,13 +16,37 @@
 #include "zlib.h"
 #define ARG() *argv++; argc--
 
-bool file_read_contents(const char *filename, uint8_t **data, long *size) {
+typedef struct {
+    size_t size;
+    size_t capacity;
+    uint8_t *data;
+} uint8_array_t;
+
+#define ARRAY_ENSURE(arr, inc) do { \
+    if ((arr).size + (inc) > (arr).capacity) { \
+        size_t new_cap = (arr).capacity == 0 ? 16 : (arr).capacity * 2; \
+        while (new_cap < (arr).size + (inc)) new_cap *= 2; \
+        (arr).data = realloc((arr).data, new_cap * sizeof((arr).data[0])); \
+        assert((arr).data != NULL); \
+        (arr).capacity = new_cap; \
+    } \
+} while (0)
+
+#define ARRAY_APPEND(arr, v) do { \
+    ARRAY_ENSURE(arr, 1); \
+    (arr).data[(arr).size ++] = (v); \
+} while (0)
+
+#define ARRAY_APPEND_BYTES(arr, src, len) do { \
+    ARRAY_ENSURE(arr, (len)); \
+    memcpy((arr).data + (arr).size, (src), (len)); \
+    (arr).size += (len); \
+} while (0)
+
+bool file_read_contents_fp(FILE *file, uint8_t **data, long *size) {
     bool ret = true;
 #define return_defer(code) do { ret = (code); goto defer; } while (0);
 #define expect(expr) if (!(expr)) return_defer(false)
-    FILE *file = NULL;
-    file = fopen(filename, "rb");
-    expect(file != NULL);
 
     expect(fseek(file, 0L, SEEK_END) != -1);
     *size = ftell(file);
@@ -35,10 +60,30 @@ bool file_read_contents(const char *filename, uint8_t **data, long *size) {
 #undef return_defer
 #undef expect
 defer:
-    if (file) fclose(file);
     if (!ret) {
         if (*data) free(*data);
     }
+    return ret;
+}
+
+bool file_read_contents(const char *filename, uint8_t **data, long *size) {
+    FILE *file = fopen(filename, "rb");
+    if (file == NULL) return false;
+    bool ret = file_read_contents_fp(file, data, size);
+    fclose(file);
+    return ret;
+}
+
+bool file_read_contents_at(int dir_fd, const char *filename, uint8_t **data, long *size) {
+    int fd = openat(dir_fd, filename, O_RDONLY);
+    assert(fd > 0);
+    FILE *file = fdopen(fd, "rb");
+    if (file == NULL) {
+        close(fd);
+        return false;
+    }
+    bool ret = file_read_contents_fp(file, data, size);
+    fclose(file);
     return ret;
 }
 
@@ -325,14 +370,127 @@ defer:
     return ret;
 }
 
+bool hash_object(git_object_t type, uint8_t *data, size_t size, uint8_t hash[SHA1_DIGEST_BYTE_LENGTH], bool writeobject) {
+    bool ret = true;
+    uint8_t *object = NULL;
+    int dir_fd = AT_FDCWD;
+    zlib_context ctx = {0};
+#define return_defer(code) do { ret = (code); goto defer; } while (0);
+
+    long numlen = 0;
+    long tmp = size;
+    while (tmp != 0) {
+        numlen ++;
+        tmp /= 10;
+    }
+
+    // type SP size NULL filedata
+    long objectsize = size + numlen + 1;
+    _Static_assert(NUM_OBJECTS == 3, "Objects have changed. May need handling here");
+    switch (type) {
+        case BLOB:
+        case TREE:
+            objectsize += 5;
+            break;
+
+        default:
+            UNREACHABLE();
+            return_defer(false);
+    }
+    object = malloc(objectsize);
+    if (object == NULL) {
+        fprintf(stderr, "Ran out of memory creating object\n");
+        return_defer(1);
+    }
+
+    long headersize = 0;
+    _Static_assert(NUM_OBJECTS == 3, "Objects have changed. May need handling here");
+    switch (type) {
+        case BLOB:
+            headersize = snprintf((char *)object, objectsize, "blob %ld", size);
+            assert(headersize == numlen + 5);
+            break;
+
+        case TREE:
+            headersize = snprintf((char *)object, objectsize, "tree %ld", size);
+            assert(headersize == numlen + 5);
+            break;
+
+        default:
+            UNREACHABLE();
+            return_defer(false);
+    }
+    assert(object[headersize] == '\0');
+
+    memcpy(object + headersize + 1, data, size);
+
+/* hexdump(object, objectsize); */
+    if (!sha1_digest(object, objectsize, hash)) {
+        fprintf(stderr, "Error while creating SHA1 digest of object\n");
+        return_defer(1);
+    }
+
+    if (writeobject) {
+        // mkdir .git/objects
+        // TODO different git dir locations
+        // TODO find parent dir if within the git file system
+        if ((mkdirat(dir_fd, ".git", 0755) == -1 && errno != EEXIST) ||
+            (mkdirat(dir_fd, ".git/objects", 0755) == -1 && errno != EEXIST)) {
+            fprintf(stderr, "Failed to create directory: .git/objects: %s\n", strerror(errno));
+            return_defer(1);
+        }
+        int fd = openat(dir_fd, ".git/objects", O_DIRECTORY);
+        if (dir_fd != AT_FDCWD) close(dir_fd);
+        dir_fd = fd;
+
+        char byte1[3];
+        assert(snprintf(byte1, 3, "%02x", hash[0]) == 2);
+        if (mkdirat(dir_fd, byte1, 0755) == -1 && errno != EEXIST) {
+            fprintf(stderr, "Failed to create directory: .git/objects/%s: %s\n", byte1, strerror(errno));
+            return_defer(1);
+        }
+        fd = openat(dir_fd, byte1, O_DIRECTORY);
+        if (dir_fd != AT_FDCWD) close(dir_fd);
+        dir_fd = fd;
+
+        char rest[2 * (SHA1_DIGEST_BYTE_LENGTH - 1) + 1];
+        for (int idx = 1; idx < SHA1_DIGEST_BYTE_LENGTH; idx ++) {
+            assert(snprintf(rest + (idx - 1) * 2, 3, "%02x", hash[idx]) == 2);
+        }
+
+        int unlink_ret = unlinkat(dir_fd, rest, 0);
+        if (unlink_ret == -1) {
+            assert(errno == ENOENT);
+        }
+        int object_fd = openat(dir_fd, rest, O_CREAT|O_TRUNC|O_WRONLY, 0644);
+        if (object_fd == -1) {
+            fprintf(stderr, "Failed to create object file: .git/objects/%s/%s: %s\n", byte1, rest, strerror(errno));
+            return_defer(1);
+        }
+
+        ctx.deflate.in.data = object;
+        ctx.deflate.in.size = objectsize;
+        if (!zlib_compress(&ctx)) {
+            fprintf(stderr, "Error while zlib compressing the object\n");
+            return_defer(1);
+        }
+        assert(write(object_fd, ctx.deflate.out.data, ctx.deflate.out.size) == ctx.deflate.out.size);
+    }
+
+#undef return_defer
+defer:
+    if (dir_fd != AT_FDCWD) close(dir_fd);
+    if (ctx.deflate.out.data) free(ctx.deflate.out.data);
+    if (object) free(object);
+    return ret;
+}
+
 int hash_object_command(const char *program, int argc, char *argv[]) {
     int ret = 0;
     FILE *file = NULL;
     uint8_t *filedata = NULL;
     uint8_t *blob = NULL;
-    int dir_fd = AT_FDCWD;
     int blob_fd = -1;
-    zlib_context ctx = {0};
 #define return_defer(code) do { ret = (code); goto defer; } while (0);
 #define usage() do { \
     fprintf(stderr, "usage: %s hash-object [-w] <filename>\n", program); \
@@ -360,86 +518,14 @@ int hash_object_command(const char *program, int argc, char *argv[]) {
         return_defer(1);
     }
 
-/* hexdump(filedata, size); */
-
-    long bloblen = 0;
-    long tmp = size;
-    while (tmp != 0) {
-        bloblen ++;
-        tmp /= 10;
-    }
-
-    // blob SP bloblen NULL filedata
-    long blobsize = size + bloblen + 6;
-    blob = malloc(blobsize);
-    if (blob == NULL) {
-        fprintf(stderr, "Ran out of memory creating blob\n");
+    uint8_t hash[SHA1_DIGEST_BYTE_LENGTH];
+    if (!hash_object(BLOB, filedata, size, hash, writeblob)) {
+        fprintf(stderr, "Error hashing blob for %s\n", filename);
         return_defer(1);
-    }
-
-    long headersize = snprintf((char *)blob, blobsize, "blob %ld", size);
-    assert(headersize == bloblen + 5);
-    assert(blob[headersize] == '\0');
-
-    memcpy(blob + headersize + 1, filedata, size);
-
-    uint8_t result[SHA1_DIGEST_BYTE_LENGTH];
-
-/* hexdump(blob, blobsize); */
-    if (!sha1_digest(blob, blobsize, result)) {
-        fprintf(stderr, "Error while creating SHA1 digest of blob\n");
-        return_defer(1);
-    }
-
-    if (writeblob) {
-        // mkdir .git/objects
-        // TODO different git dir locations
-        // TODO find parent dir if within the git file system
-        if ((mkdirat(dir_fd, ".git", 0755) == -1 && errno != EEXIST) ||
-            (mkdirat(dir_fd, ".git/objects", 0755) == -1 && errno != EEXIST)) {
-            fprintf(stderr, "Failed to create directory: .git/objects: %s\n", strerror(errno));
-            return_defer(1);
-        }
-        int fd = openat(dir_fd, ".git/objects", O_DIRECTORY);
-        if (dir_fd != AT_FDCWD) close(dir_fd);
-        dir_fd = fd;
-
-        char byte1[3];
-        assert(snprintf(byte1, 3, "%02x", result[0]) == 2);
-        if (mkdirat(dir_fd, byte1, 0755) == -1 && errno != EEXIST) {
-            fprintf(stderr, "Failed to create directory: .git/objects/%s: %s\n", byte1, strerror(errno));
-            return_defer(1);
-        }
-        fd = openat(dir_fd, byte1, O_DIRECTORY);
-        if (dir_fd != AT_FDCWD) close(dir_fd);
-        dir_fd = fd;
-
-        char rest[2 * (SHA1_DIGEST_BYTE_LENGTH - 1) + 1];
-        for (int idx = 1; idx < SHA1_DIGEST_BYTE_LENGTH; idx ++) {
-            assert(snprintf(rest + (idx - 1) * 2, 3, "%02x", result[idx]) == 2);
-        }
-
-        int unlink_ret = unlinkat(dir_fd, rest, 0);
-        if (unlink_ret == -1) {
-            assert(errno == ENOENT);
-        }
-        int blob_fd = openat(dir_fd, rest, O_CREAT|O_TRUNC|O_WRONLY, 0644);
-        if (blob_fd == -1) {
-            fprintf(stderr, "Failed to create object file: .git/objects/%s/%s: %s\n", byte1, rest, strerror(errno));
-            return_defer(1);
-        }
-
-        ctx.deflate.in.data = blob;
-        ctx.deflate.in.size = blobsize;
-        if (!zlib_compress(&ctx)) {
-            fprintf(stderr, "Error while zlib compressing the blob\n");
-            return_defer(1);
-        }
-        assert(write(blob_fd, ctx.deflate.out.data, ctx.deflate.out.size) == ctx.deflate.out.size);
     }
 
     for (int idx = 0; idx < SHA1_DIGEST_BYTE_LENGTH; idx ++) {
-        printf("%02x", result[idx]);
+        printf("%02x", hash[idx]);
     }
     printf("\n");
 
@@ -449,9 +535,7 @@ defer:
     if (file != NULL) fclose(file);
     if (filedata != NULL) free(filedata);
     if (blob != NULL) free(blob);
-    if (dir_fd != AT_FDCWD) close(dir_fd);
     if (blob_fd != -1) close(blob_fd);
-    if (ctx.deflate.out.data) free(ctx.deflate.out.data);
     return ret;
 }
 
@@ -578,8 +662,115 @@ defer:
     return ret;
 }
 
+bool write_tree(int dir_fd, uint8_t hash[SHA1_DIGEST_BYTE_LENGTH]) {
+    bool ret = true;
+    DIR *dp = NULL;
+    uint8_array_t tree_data = {0};
+#define return_defer(code) do { ret = (code); goto defer; } while (0);
+    dp = fdopendir(dir_fd);
+    assert(dp != NULL);
+    struct dirent *ep = NULL;
+    while ((ep = readdir(dp)) != NULL) {
+        // FIXME handle .gitignore
+        // FIXME handle staging area (i.e. .git/index)
+        if (strcmp(ep->d_name, ".") == 0 ||
+                strcmp(ep->d_name, "..") == 0 ||
+                strcmp(ep->d_name, ".git") == 0) {
+            continue;
+        }
+        struct stat filestat = {0};
+        assert(fstatat(dirfd(dp), ep->d_name, &filestat, 0) == 0);
+        switch (filestat.st_mode & S_IFMT) {
+            case S_IFDIR: {
+                // FIXME get the hash
+                int fd = openat(dirfd(dp), ep->d_name, O_RDONLY);
+                assert(fd > 0);
+                fprintf(stderr, "tree start %s\n", ep->d_name);
+                if (!write_tree(fd, hash)) {
+                    continue;
+                }
+                ARRAY_ENSURE(tree_data, 8 + strlen(ep->d_name) + SHA1_DIGEST_BYTE_LENGTH);
+                int written = snprintf((char *)tree_data.data + tree_data.size,
+                            8 + strlen(ep->d_name),
+                            "%6o %s%c",
+                            S_IFDIR,
+                            ep->d_name,
+                            '\0');
+                assert(written > 0);
+                tree_data.size += written;
+                assert(tree_data.size + SHA1_DIGEST_BYTE_LENGTH <= tree_data.capacity);
+                ARRAY_APPEND_BYTES(tree_data, hash, SHA1_DIGEST_BYTE_LENGTH);
+
+            }; break;
+
+            case S_IFREG: {
+                ARRAY_ENSURE(tree_data, 8 + strlen(ep->d_name) + SHA1_DIGEST_BYTE_LENGTH);
+                int written = snprintf((char *)tree_data.data + tree_data.size,
+                            8 + strlen(ep->d_name),
+                            "%6o %s%c",
+                            filestat.st_mode,
+                            ep->d_name,
+                            '\0');
+                assert(written > 0);
+                tree_data.size += written;
+
+                uint8_t *data = NULL;
+                long size = 0;
+                assert(file_read_contents_at(dirfd(dp), ep->d_name, &data, &size));
+                assert(hash_object(BLOB, data, size, hash, true));
+                free(data);
+
+                ARRAY_APPEND_BYTES(tree_data, hash, SHA1_DIGEST_BYTE_LENGTH);
+            }; break;
+
+            case S_IFBLK:
+            case S_IFCHR:
+            case S_IFIFO:
+            case S_IFLNK:
+            case S_IFSOCK:
+            default:
+                UNREACHABLE();
+        }
+    }
+    hexdump(tree_data.data, tree_data.size);
+    fprintf(stderr, "tree done\n");
+    if (tree_data.size == 0) {
+        return_defer(false);
+    }
+
+    if (!hash_object(TREE, tree_data.data, tree_data.size, hash, true)) {
+        return_defer(false);
+    }
+
+    return_defer(true);
+#undef return_defer
+defer:
+    if (tree_data.data) free(tree_data.data);
+    if (dp) closedir(dp);
+    return ret;
+}
+
 int write_tree_command(const char *program, int argc, char *argv[]) {
-    UNIMPLENTED();
+    int ret = 0;
+    int root_fd = AT_FDCWD;
+#define return_defer(code) do { ret = (code); goto defer; } while (0);
+    if (argc > 0) {
+        UNIMPLENTED("args for write-tree");
+        return_defer(1);
+    }
+    // FIXME in the future, this will parse .git/index (man gitformat-index)
+    // FIXME handle .gitignore
+    uint8_t hash[SHA1_DIGEST_BYTE_LENGTH];
+    // FIXME work inside folders
+    root_fd = openat(root_fd, ".", O_RDONLY);
+    assert(root_fd > 0);
+    if (!write_tree(root_fd, hash)) {
+        return_defer(1);
+    }
+#undef return_defer
+defer:
+    if (root_fd != AT_FDCWD) close(root_fd);
+    return ret;
 }
 
 int main(int argc, char *argv[]) {
@@ -604,6 +795,8 @@ int main(int argc, char *argv[]) {
         return hash_object_command(program, argc, argv);
     } else if (strcmp(command, "ls-tree") == 0) {
         return ls_tree_command(program, argc, argv);
+    } else if (strcmp(command, "write-tree") == 0) {
+        return write_tree_command(program, argc, argv);
     } else {
         // FIXME work out similar commands
         fprintf(stderr, "Unknown command %s\n", command);

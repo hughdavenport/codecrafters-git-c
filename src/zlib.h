@@ -168,7 +168,7 @@ void hexdump(uint8_t *data, size_t len) {
             fprintf(stderr, "  ");
         }
         fprintf(stderr, "  ");
-        for (size_t j = i - 16 + (i % 16); j < i; j ++) {
+        for (size_t j = i - (i % 16); j < i; j ++) {
             switch (data[j]) {
                 case 0x00:
                     fprintf(stderr, "\033[1;37m");
