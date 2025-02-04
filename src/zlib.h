@@ -110,6 +110,7 @@ void hexdump(uint8_t *data, size_t len);
 
 void hexdump(uint8_t *data, size_t len) {
     for (size_t i = 0; i < len; i ++) {
+        fprintf(stderr, "\033[0m");
         if (i % 16 == 0) fprintf(stderr, "%08lx:", i);
 
         if (i % 2 == 0) fprintf(stderr, " ");
@@ -131,9 +132,68 @@ void hexdump(uint8_t *data, size_t len) {
                 }
         }
         fprintf(stderr, "%02x\033[0m", data[i]);
-        if (i % 16 == 15) fprintf(stderr, "\n");
+        if (i % 16 == 15) {
+            fprintf(stderr, "  ");
+            for (size_t j = i - 15; j <= i; j ++) {
+                switch (data[j]) {
+                    case 0x00:
+                        fprintf(stderr, "\033[1;37m");
+                        break;
+                    case '\t':
+                    case '\n':
+                    case '\r':
+                        fprintf(stderr, "\033[1;33m");
+                        break;
+
+                    default:
+                        if (isprint(data[j])) {
+                            fprintf(stderr, "\033[1;32m");
+                        } else {
+                            fprintf(stderr, "\033[1;31m");
+                        }
+                }
+                if (isprint(data[j])) {
+                    fprintf(stderr, "%c", data[j]);
+                } else {
+                    fprintf(stderr, ".");
+                }
+            }
+            fprintf(stderr, "\n");
+        }
     }
-    fprintf(stderr, "\n");
+    size_t i = len;
+    if (i % 16 != 0) {
+        for (size_t j = 0; j < i % 16; j ++) {
+            if (j % 2 == 0) fprintf(stderr, " ");
+            fprintf(stderr, "  ");
+        }
+        fprintf(stderr, "  ");
+        for (size_t j = i - (i % 16); j < i; j ++) {
+            switch (data[j]) {
+                case 0x00:
+                    fprintf(stderr, "\033[1;37m");
+                    break;
+                case '\t':
+                case '\n':
+                case '\r':
+                    fprintf(stderr, "\033[1;33m");
+                    break;
+
+                default:
+                    if (isprint(data[j])) {
+                        fprintf(stderr, "\033[1;32m");
+                    } else {
+                        fprintf(stderr, "\033[1;31m");
+                    }
+            }
+            if (isprint(data[j])) {
+                fprintf(stderr, "%c", data[j]);
+            } else {
+                fprintf(stderr, ".");
+            }
+        }
+    }
+    fprintf(stderr, "\033[0m\n");
 }
 
 #define DEFLATE_BITS(ctx) ((ctx)->bits.size * 8 - (ctx)->bits.index)

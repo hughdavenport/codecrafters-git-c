@@ -360,6 +360,8 @@ int hash_object_command(const char *program, int argc, char *argv[]) {
         return_defer(1);
     }
 
+hexdump(filedata, size);
+
     long bloblen = 0;
     long tmp = size;
     while (tmp != 0) {
@@ -383,6 +385,7 @@ int hash_object_command(const char *program, int argc, char *argv[]) {
 
     uint8_t result[SHA1_DIGEST_BYTE_LENGTH];
 
+hexdump(blob, blobsize);
     if (!sha1_digest(blob, blobsize, result)) {
         fprintf(stderr, "Error while creating SHA1 digest of blob\n");
         return_defer(1);
