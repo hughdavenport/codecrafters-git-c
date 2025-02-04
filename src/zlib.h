@@ -163,12 +163,12 @@ void hexdump(uint8_t *data, size_t len) {
     }
     size_t i = len;
     if (i % 16 != 0) {
-        for (size_t j = 0; j < i % 16; j ++) {
+        for (size_t j = i - 16 + (i % 16) + 1; j <= i; j ++) {
             if (j % 2 == 0) fprintf(stderr, " ");
             fprintf(stderr, "  ");
         }
         fprintf(stderr, "  ");
-        for (size_t j = i - (i % 16); j < i; j ++) {
+        for (size_t j = i - 16 + (i % 16); j < i; j ++) {
             switch (data[j]) {
                 case 0x00:
                     fprintf(stderr, "\033[1;37m");
