@@ -578,6 +578,10 @@ defer:
     return ret;
 }
 
+int write_tree_command(const char *program, int argc, char *argv[]) {
+    UNIMPLENTED();
+}
+
 int main(int argc, char *argv[]) {
 
     // Disable output buffering
