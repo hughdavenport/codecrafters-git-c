@@ -777,35 +777,38 @@ defer:
     return ret;
 }
 
+struct {
+    const char *name;
+    int (*func)(const char *program, int argc, char **argv);
+} commands[] = {
+    { .name = "init", .func = init_command },
+    { .name = "cat-file", .func = cat_file_command },
+    { .name = "hash-object", .func = hash_object_command },
+    { .name = "ls-tree", .func = ls_tree_command },
+    { .name = "write-tree", .func = write_tree_command },
+};
+
 int main(int argc, char *argv[]) {
 
     // Disable output buffering
     setbuf(stdout, NULL);
     setbuf(stderr, NULL);
 
+    const char *program = ARG();
+
     if (argc < 2) {
         fprintf(stderr, "Usage: ./your_program.sh <command> [<args>]\n");
         return 1;
     }
 
-    const char *program = ARG(); (void)program;
     const char *command = ARG();
 
-    if (strcmp(command, "init") == 0) {
-        return init_command(program, argc, argv);
-    } else if (strcmp(command, "cat-file") == 0) {
-        return cat_file_command(program, argc, argv);
-    } else if (strcmp(command, "hash-object") == 0) {
-        return hash_object_command(program, argc, argv);
-    } else if (strcmp(command, "ls-tree") == 0) {
-        return ls_tree_command(program, argc, argv);
-    } else if (strcmp(command, "write-tree") == 0) {
-        return write_tree_command(program, argc, argv);
-    } else {
-        // FIXME work out similar commands
-        fprintf(stderr, "Unknown command %s\n", command);
-        return 1;
+    for (size_t i = 0; i < C_ARRAY_LEN(commands); i ++) {
+        if (strcmp(command, commands[i].name) == 0) {
+            return commands[i].func(program, argc, argv);
+        }
     }
 
-    return 0;
+    fprintf(stderr, "Unknown command %s\n", command);
+    return 1;
 }
