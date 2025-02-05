@@ -91,22 +91,12 @@ void hexdump(uint8_t *data, size_t len);
 #include <ctype.h>
 #include <arpa/inet.h>
 
-#ifndef UNREACHABLE
-#define UNREACHABLE() do { fprintf(stderr, "%s:%d: UNREACHABLE\n", __FILE__, __LINE__); fflush(stderr); abort(); } while (0)
-#endif
-#ifndef UNIMPLENTED
-#define UNIMPLENTED(fmt, ...) do { fprintf(stderr, "%s:%d: UNIMPLENTED %s: " fmt "\n", __FILE__, __LINE__, __func__, ##__VA_ARGS__); fflush(stderr); abort(); } while (0)
-#endif
-#ifndef INFO
-#define INFO(fmt, ...) do { fprintf(stderr, "%s:%d: INFO: " fmt, __FILE__, __LINE__, ##__VA_ARGS__); fflush(stderr); } while (0)
-#endif // INFO
-#ifndef WARN
-#define WARN(fmt, ...) do { fprintf(stderr, "%s:%d: WARN: " fmt, __FILE__, __LINE__, ##__VA_ARGS__); fflush(stderr); } while (0)
-#endif
+#define ZLIB_UNREACHABLE() do { fprintf(stderr, "%s:%d: UNREACHABLE\n", __FILE__, __LINE__); fflush(stderr); abort(); } while (0)
+#define ZLIB_UNIMPLENTED(fmt, ...) do { fprintf(stderr, "%s:%d: UNIMPLENTED %s: " fmt "\n", __FILE__, __LINE__, __func__, ##__VA_ARGS__); fflush(stderr); abort(); } while (0)
+#define ZLIB_INFO(fmt, ...) do { fprintf(stderr, "%s:%d: INFO: " fmt, __FILE__, __LINE__, ##__VA_ARGS__); fflush(stderr); } while (0)
+#define ZLIB_WARN(fmt, ...) do { fprintf(stderr, "%s:%d: WARN: " fmt, __FILE__, __LINE__, ##__VA_ARGS__); fflush(stderr); } while (0)
 
-#ifndef C_ARRAY_LEN
-#define C_ARRAY_LEN(arr) (sizeof((arr))/(sizeof((arr)[0])))
-#endif
+#define ZLIB_C_ARRAY_LEN(arr) (sizeof((arr))/(sizeof((arr)[0])))
 
 void hexdump(uint8_t *data, size_t len) {
     for (size_t i = 0; i < len; i ++) {
@@ -300,7 +290,7 @@ uint64_t _deflate_peek_bits_rev(deflate_context *ctx, size_t bits) {
         case 7: return ((((uint64_t)*ctx->bits.data << 48) | ((uint64_t)*(uint16_t *)(ctx->bits.data + 1) << 32) | (*(uint32_t *)(ctx->bits.data + 3))) >> ctx->bits.index) & ((1UL << bits) - 1);
         case 8: return ((*(uint64_t *)ctx->bits.data) >> ctx->bits.index) & ((1UL << bits) - 1);
         default:
-            UNREACHABLE();
+            ZLIB_UNREACHABLE();
             ctx->state = DEFLATE_ERROR;
             return 0;
     }
@@ -363,7 +353,7 @@ uint64_t deflate_next_bytes(deflate_context *ctx, size_t bytes) {
         case 6: return (uint64_t)*(uint16_t *)(ctx->bits.data - bytes) << 32 | (*(uint32_t *)(ctx->bits.data - bytes + 2));
         case 7: return ((uint64_t)*(ctx->bits.data - bytes) << 48) | ((uint64_t)*(uint16_t *)(ctx->bits.data - bytes + 1) << 32) | (*(uint32_t *)(ctx->bits.data - bytes + 3));
         case 8: return *(uint64_t *)(ctx->bits.data - bytes);
-        default: UNREACHABLE();
+        default: ZLIB_UNREACHABLE();
     }
 }
 
@@ -398,10 +388,10 @@ bool _deflate_uncompressed(deflate_context *ctx) {
         }; break;
 
         default:
-            UNREACHABLE();
+            ZLIB_UNREACHABLE();
             return false;
     }
-    UNREACHABLE();
+    ZLIB_UNREACHABLE();
 }
 
 int _deflate_fixed_compression_code(deflate_context *ctx) {
@@ -479,7 +469,7 @@ int _deflate_fixed_compression_length_extra(deflate_context *ctx) {
         if (next == (uint16_t)EOF) return EOF;
         return 131 + ((code - 281) << offset) + next;
     }
-    UNREACHABLE();
+    ZLIB_UNREACHABLE();
     ctx->state = DEFLATE_ERROR;
     return EOF;
 }
@@ -556,7 +546,7 @@ int _deflate_fixed_compression_dist_extra(deflate_context *ctx) {
         if (next == (uint16_t)EOF) return EOF;
         return 16385 + ((code - 28) << offset) + next;
     }
-    UNREACHABLE();
+    ZLIB_UNREACHABLE();
     ctx->state = DEFLATE_ERROR;
     return EOF;
 }
@@ -578,7 +568,7 @@ bool _deflate_fixed_compression(deflate_context *ctx) {
                     ctx->state = DEFLATE_FINISHED;
                     return true;
                 } else if (code > 285) {
-                    UNREACHABLE();
+                    ZLIB_UNREACHABLE();
                     ctx->state = DEFLATE_ERROR;
                     return false;
                 }
@@ -600,7 +590,7 @@ bool _deflate_fixed_compression(deflate_context *ctx) {
                     ctx->state = DEFLATE_COMPRESSED_FIXED_DISTANCE;
                     break;
                 } else if (code > 285) {
-                    UNREACHABLE();
+                    ZLIB_UNREACHABLE();
                     ctx->state = DEFLATE_ERROR;
                     return false;
                 }
@@ -665,12 +655,12 @@ bool _deflate_fixed_compression(deflate_context *ctx) {
             }; break;
 
             default:
-                UNREACHABLE();
+                ZLIB_UNREACHABLE();
                 ctx->state = DEFLATE_ERROR;
                 return false;
         }
     }
-    UNREACHABLE();
+    ZLIB_UNREACHABLE();
     ctx->state = DEFLATE_ERROR;
     return false;
 }
@@ -678,7 +668,7 @@ bool _deflate_fixed_compression(deflate_context *ctx) {
 bool deflate_dynamic_compression_build_tree(deflate_context *ctx, huffman_tree *tree) {
     // This may need the bits swapped?
     // I was working through this, but turns out the reference implementation uses fixed for my input while stepping through debugger
-    UNIMPLENTED("");(void)ctx;(void)tree;
+    ZLIB_UNIMPLENTED("");(void)ctx;(void)tree;
 
     /* uint8_t hlit = deflate_next_bits(ctx, 5); */
     /* uint8_t hdist = deflate_next_bits(ctx, 5); */
@@ -761,7 +751,7 @@ bool _deflate_header(deflate_context *ctx) {
 
         case DEFLATE_RESERVED:
         default:
-            UNREACHABLE();
+            ZLIB_UNREACHABLE();
             ctx->state = DEFLATE_ERROR;
             return false;
     }
@@ -780,7 +770,7 @@ bool deflate_block(deflate_context *ctx) {
 
             case DEFLATE_COMPRESSED_DYNAMIC: {
                                                  /* FIXME make sure this works with state machine */
-                UNIMPLENTED("Dynamic huffman tree");
+                ZLIB_UNIMPLENTED("Dynamic huffman tree");
                 /* huffman_tree tree = {0}; */
                 /* if (!deflate_dynamic_compression_build_tree(ctx, &tree)) return false; */
 
@@ -804,7 +794,7 @@ bool deflate_block(deflate_context *ctx) {
             case DEFLATE_FINISHED: return true;
 
             default:
-                UNIMPLENTED("ctx->state = %d", ctx->state);
+                ZLIB_UNIMPLENTED("ctx->state = %d", ctx->state);
                 break;
         }
     }
@@ -834,7 +824,7 @@ bool zlib_decompress(zlib_context *ctx) {
 
                 assert(cm == 8);
                 assert(cinfo <= 7);
-                if (cinfo != 7) UNIMPLENTED("Reading different window sizes than 32K");
+                if (cinfo != 7) ZLIB_UNIMPLENTED("Reading different window sizes than 32K");
 
                 uint8_t flg = deflate_next_bytes(&ctx->deflate, 1);
                 uint16_t check = (uint16_t)cmf * 256 + (uint16_t)flg;
@@ -845,13 +835,13 @@ bool zlib_decompress(zlib_context *ctx) {
                 assert(flevel <= ZLIB_MAX_COMPRESSOR);
 
                 if (flevel != 0) {
-                    WARN("FLEVEL not 0. Not used in decompression, but useful for recompression. Ignoring value (%d)\n", flevel);
+                    ZLIB_WARN("FLEVEL not 0. Not used in decompression, but useful for recompression. Ignoring value (%d)\n", flevel);
                 }
                 ctx->state = fdict != 0 ? ZLIB_DICT : ZLIB_DEFLATE;
             }; break;
 
             case ZLIB_DICT:
-                UNIMPLENTED("Reading zlib DICTID (see RFC 1950 2.2 Data format)");
+                ZLIB_UNIMPLENTED("Reading zlib DICTID (see RFC 1950 2.2 Data format)");
                 break; // potentially should fall through?
 
             case ZLIB_DEFLATE:
@@ -886,11 +876,11 @@ bool zlib_decompress(zlib_context *ctx) {
 
             case ZLIB_ERROR:
             default:
-                UNREACHABLE();
+                ZLIB_UNREACHABLE();
                 break;
         }
     }
-    UNREACHABLE();
+    ZLIB_UNREACHABLE();
     return false;
 }
 
@@ -935,7 +925,7 @@ bool zlib_compress(zlib_context *ctx) {
             }; break;
 
             case ZLIB_DICT:
-                UNIMPLENTED("Writing zlib DICTID (see RFC 1950 2.2 Data format)");
+                ZLIB_UNIMPLENTED("Writing zlib DICTID (see RFC 1950 2.2 Data format)");
                 break; // potentially should fall through?
 
             case ZLIB_DEFLATE:
@@ -967,7 +957,7 @@ bool zlib_compress(zlib_context *ctx) {
 
             case ZLIB_ERROR:
             default:
-                UNREACHABLE();
+                ZLIB_UNREACHABLE();
                 break;
         }
     }

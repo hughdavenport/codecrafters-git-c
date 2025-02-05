@@ -1,5 +1,5 @@
+#define _GNU_SOURCE
 #include <ctype.h>
-#include <fcntl.h>
 #include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -8,13 +8,18 @@
 #include <sys/stat.h>
 #include <unistd.h>
 #include <errno.h>
+#include <fcntl.h>
 #include <dirent.h>
 
 #define SHA1_IMPLEMENTATION
 #include "sha1.h"
 #define ZLIB_IMPLEMENTATION
 #include "zlib.h"
+
 #define ARG() *argv++; argc--
+
+#define C_ARRAY_LEN(arr) (sizeof((arr))/(sizeof((arr)[0])))
+
 
 typedef struct {
     size_t size;
@@ -100,7 +105,7 @@ bool read_object(char *hash, uint8_t **data, long *size) {
     }
     char *objects_dir = ".git/objects";
     if (sprintf(object_path, "%s/xx/%38s", objects_dir, hash + 2) == -1) {
-        UNREACHABLE();
+        ZLIB_UNREACHABLE();
         return_defer(false);
     }
     object_path[strlen(objects_dir)+1] = hash[0];
@@ -255,11 +260,11 @@ int cat_file_command(const char *program, int argc, char *argv[]) {
         usage();
         return_defer(1);
     }
-    if (strlen(hash) != 2 * SHA1_DIGEST_BYTE_LENGTH) {
+    if (strlen(hash) != SHA1_DIGEST_HEX_LENGTH) {
         fprintf(stderr, "ERROR: %s is not a valid SHA-1 hash\n", hash);
         return_defer(1);
     }
-    for (size_t i = 0; i < 2 * SHA1_DIGEST_BYTE_LENGTH; i ++) {
+    for (size_t i = 0; i < SHA1_DIGEST_HEX_LENGTH; i ++) {
         if (isxdigit(hash[i]) == 0) {
             fprintf(stderr, "ERROR: %s is not a valid SHA-1 hash\n", hash);
             return_defer(1);
@@ -348,18 +353,16 @@ int cat_file_command(const char *program, int argc, char *argv[]) {
                     case S_IFLNK:
                     case S_IFSOCK:
                     default:
-                        UNREACHABLE();
+                        ZLIB_UNREACHABLE();
                 }
-                for (size_t i = 0; i < SHA1_DIGEST_BYTE_LENGTH; i ++) {
-                    printf("%02x", hash[i]);
-                }
+                SHA1_PRINTF_HEX(hash);
                 printf("    %s\n", file);
             }
         }; break;
 
 
         default:
-            UNREACHABLE();
+            ZLIB_UNREACHABLE();
             return_defer(1);
     }
 
@@ -394,7 +397,7 @@ bool hash_object(git_object_t type, uint8_t *data, size_t size, uint8_t hash[SHA
             break;
 
         default:
-            UNREACHABLE();
+            ZLIB_UNREACHABLE();
             return_defer(false);
     }
     object = malloc(objectsize);
@@ -417,7 +420,7 @@ bool hash_object(git_object_t type, uint8_t *data, size_t size, uint8_t hash[SHA
             break;
 
         default:
-            UNREACHABLE();
+            ZLIB_UNREACHABLE();
             return_defer(false);
     }
     assert(object[headersize] == '\0');
@@ -443,8 +446,10 @@ bool hash_object(git_object_t type, uint8_t *data, size_t size, uint8_t hash[SHA
         if (dir_fd != AT_FDCWD) close(dir_fd);
         dir_fd = fd;
 
-        char byte1[3];
-        assert(snprintf(byte1, 3, "%02x", hash[0]) == 2);
+        char digest[SHA1_DIGEST_HEX_LENGTH + 1];
+        SHA1_SNPRINTF_HEX(digest, C_ARRAY_LEN(digest), hash);
+        char byte1[3] = { digest[0], digest[1], '\0' };
+        char *rest = digest + 2;
         if (mkdirat(dir_fd, byte1, 0755) == -1 && errno != EEXIST) {
             fprintf(stderr, "Failed to create directory: .git/objects/%s: %s\n", byte1, strerror(errno));
             return_defer(1);
@@ -452,11 +457,6 @@ bool hash_object(git_object_t type, uint8_t *data, size_t size, uint8_t hash[SHA
         fd = openat(dir_fd, byte1, O_DIRECTORY);
         if (dir_fd != AT_FDCWD) close(dir_fd);
         dir_fd = fd;
-
-        char rest[2 * (SHA1_DIGEST_BYTE_LENGTH - 1) + 1];
-        for (int idx = 1; idx < SHA1_DIGEST_BYTE_LENGTH; idx ++) {
-            assert(snprintf(rest + (idx - 1) * 2, 3, "%02x", hash[idx]) == 2);
-        }
 
         int unlink_ret = unlinkat(dir_fd, rest, 0);
         if (unlink_ret == -1) {
@@ -524,9 +524,7 @@ int hash_object_command(const char *program, int argc, char *argv[]) {
         return_defer(1);
     }
 
-    for (int idx = 0; idx < SHA1_DIGEST_BYTE_LENGTH; idx ++) {
-        printf("%02x", hash[idx]);
-    }
+    SHA1_PRINTF_HEX(hash);
     printf("\n");
 
 #undef usage
@@ -638,13 +636,11 @@ int ls_tree_command(const char *program, int argc, char *argv[]) {
                 case S_IFLNK:
                 case S_IFSOCK:
                 default:
-                    UNREACHABLE();
+                    ZLIB_UNREACHABLE();
             }
         }
         if (!name_only) {
-            for (size_t i = 0; i < SHA1_DIGEST_BYTE_LENGTH; i ++) {
-                printf("%02x", hash[i]);
-            }
+            SHA1_PRINTF_HEX(hash);
         }
         if (!name_only && !object_only) {
             printf("    ");
@@ -664,37 +660,37 @@ defer:
 
 bool write_tree(int dir_fd, uint8_t hash[SHA1_DIGEST_BYTE_LENGTH]) {
     bool ret = true;
-    DIR *dp = NULL;
     uint8_array_t tree_data = {0};
+    int n = -1;
+    struct dirent **dirlist = NULL;
 #define return_defer(code) do { ret = (code); goto defer; } while (0);
-    dp = fdopendir(dir_fd);
-    assert(dp != NULL);
-    struct dirent *ep = NULL;
-    while ((ep = readdir(dp)) != NULL) {
+    n = scandirat(dir_fd, ".", &dirlist, NULL, alphasort);
+    if (n == -1) {
+        return_defer(false);
+    }
+    for (int i = 0; i < n; i ++) {
         // FIXME handle .gitignore
         // FIXME handle staging area (i.e. .git/index)
-        if (strcmp(ep->d_name, ".") == 0 ||
-                strcmp(ep->d_name, "..") == 0 ||
-                strcmp(ep->d_name, ".git") == 0) {
+        if (strcmp(dirlist[i]->d_name, ".") == 0 ||
+                strcmp(dirlist[i]->d_name, "..") == 0 ||
+                strcmp(dirlist[i]->d_name, ".git") == 0) {
             continue;
         }
         struct stat filestat = {0};
-        assert(fstatat(dirfd(dp), ep->d_name, &filestat, 0) == 0);
+        assert(fstatat(dir_fd, dirlist[i]->d_name, &filestat, 0) == 0);
         switch (filestat.st_mode & S_IFMT) {
             case S_IFDIR: {
-                // FIXME get the hash
-                int fd = openat(dirfd(dp), ep->d_name, O_RDONLY);
+                int fd = openat(dir_fd, dirlist[i]->d_name, O_RDONLY);
                 assert(fd > 0);
-                fprintf(stderr, "tree start %s\n", ep->d_name);
                 if (!write_tree(fd, hash)) {
                     continue;
                 }
-                ARRAY_ENSURE(tree_data, 8 + strlen(ep->d_name) + SHA1_DIGEST_BYTE_LENGTH);
+                ARRAY_ENSURE(tree_data, 8 + strlen(dirlist[i]->d_name) + SHA1_DIGEST_BYTE_LENGTH);
                 int written = snprintf((char *)tree_data.data + tree_data.size,
-                            8 + strlen(ep->d_name),
-                            "%6o %s%c",
+                            8 + strlen(dirlist[i]->d_name),
+                            "%06o %s%c",
                             S_IFDIR,
-                            ep->d_name,
+                            dirlist[i]->d_name,
                             '\0');
                 assert(written > 0);
                 tree_data.size += written;
@@ -704,19 +700,19 @@ bool write_tree(int dir_fd, uint8_t hash[SHA1_DIGEST_BYTE_LENGTH]) {
             }; break;
 
             case S_IFREG: {
-                ARRAY_ENSURE(tree_data, 8 + strlen(ep->d_name) + SHA1_DIGEST_BYTE_LENGTH);
+                ARRAY_ENSURE(tree_data, 8 + strlen(dirlist[i]->d_name) + SHA1_DIGEST_BYTE_LENGTH);
                 int written = snprintf((char *)tree_data.data + tree_data.size,
-                            8 + strlen(ep->d_name),
+                            8 + strlen(dirlist[i]->d_name),
                             "%6o %s%c",
-                            filestat.st_mode,
-                            ep->d_name,
+                            ((filestat.st_mode & S_IEXEC) != 0) ? 0100755 : 0100644,
+                            dirlist[i]->d_name,
                             '\0');
                 assert(written > 0);
                 tree_data.size += written;
 
                 uint8_t *data = NULL;
                 long size = 0;
-                assert(file_read_contents_at(dirfd(dp), ep->d_name, &data, &size));
+                assert(file_read_contents_at(dir_fd, dirlist[i]->d_name, &data, &size));
                 assert(hash_object(BLOB, data, size, hash, true));
                 free(data);
 
@@ -729,11 +725,10 @@ bool write_tree(int dir_fd, uint8_t hash[SHA1_DIGEST_BYTE_LENGTH]) {
             case S_IFLNK:
             case S_IFSOCK:
             default:
-                UNREACHABLE();
+                ZLIB_UNREACHABLE();
         }
     }
-    hexdump(tree_data.data, tree_data.size);
-    fprintf(stderr, "tree done\n");
+    /* hexdump(tree_data.data, tree_data.size); */
     if (tree_data.size == 0) {
         return_defer(false);
     }
@@ -745,8 +740,13 @@ bool write_tree(int dir_fd, uint8_t hash[SHA1_DIGEST_BYTE_LENGTH]) {
     return_defer(true);
 #undef return_defer
 defer:
+    if (dirlist != NULL) {
+        while (n-- > 0) {
+            if (dirlist[n] != NULL) free(dirlist[n]);
+        }
+        free(dirlist);
+    }
     if (tree_data.data) free(tree_data.data);
-    if (dp) closedir(dp);
     return ret;
 }
 
@@ -755,7 +755,7 @@ int write_tree_command(const char *program, int argc, char *argv[]) {
     int root_fd = AT_FDCWD;
 #define return_defer(code) do { ret = (code); goto defer; } while (0);
     if (argc > 0) {
-        UNIMPLENTED("args for write-tree");
+        ZLIB_UNIMPLENTED("args for write-tree");
         return_defer(1);
     }
     // FIXME in the future, this will parse .git/index (man gitformat-index)
@@ -767,6 +767,10 @@ int write_tree_command(const char *program, int argc, char *argv[]) {
     if (!write_tree(root_fd, hash)) {
         return_defer(1);
     }
+
+    SHA1_PRINTF_HEX(hash);
+    printf("\n");
+
 #undef return_defer
 defer:
     if (root_fd != AT_FDCWD) close(root_fd);
