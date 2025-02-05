@@ -777,16 +777,33 @@ defer:
     return ret;
 }
 
+int help_command(const char *program, int argc, char **argv);
+
 struct {
     const char *name;
     int (*func)(const char *program, int argc, char **argv);
 } commands[] = {
-    { .name = "init", .func = init_command },
-    { .name = "cat-file", .func = cat_file_command },
+    // FIXME order this and do binary chop?
+    //       or could hash it for O(1)
+    { .name = "help",        .func = help_command },
+    { .name = "init",        .func = init_command },
+    { .name = "cat-file",    .func = cat_file_command },
     { .name = "hash-object", .func = hash_object_command },
-    { .name = "ls-tree", .func = ls_tree_command },
-    { .name = "write-tree", .func = write_tree_command },
+    { .name = "ls-tree",     .func = ls_tree_command },
+    { .name = "write-tree",  .func = write_tree_command },
 };
+
+int help_command(const char *program, int argc, char **argv) {
+    if (argc < 1) {
+        printf("Usage: ./your_program.sh <command> [<args>]\n");
+        printf("\n");
+        printf("Available commands:\n");
+        for (size_t i = 0; i < C_ARRAY_LEN(commands); i ++) {
+            printf("    %s\n", commands[i].name);
+        }
+    }
+    return 0;
+}
 
 int main(int argc, char *argv[]) {
 
@@ -796,8 +813,8 @@ int main(int argc, char *argv[]) {
 
     const char *program = ARG();
 
-    if (argc < 2) {
-        fprintf(stderr, "Usage: ./your_program.sh <command> [<args>]\n");
+    if (argc < 1) {
+        help_command(program, argc, argv);
         return 1;
     }
 
