@@ -16,9 +16,39 @@
 #define ZLIB_IMPLEMENTATION
 #include "zlib.h"
 
+#define GIT_UNREACHABLE() do { fprintf(stderr, "%s:%d: UNREACHABLE\n", __FILE__, __LINE__); fflush(stderr); abort(); } while (0)
+#define GIT_UNIMPLENTED(fmt, ...) do { fprintf(stderr, "%s:%d: UNIMPLENTED %s: " fmt "\n", __FILE__, __LINE__, __func__, ##__VA_ARGS__); fflush(stderr); abort(); } while (0)
 #define ARG() *argv++; argc--
 
 #define C_ARRAY_LEN(arr) (sizeof((arr))/(sizeof((arr)[0])))
+
+#define GIT_DIR_MODE  0040000
+#define GIT_EXE_MODE  0100755
+#define GIT_FILE_MODE 0100644
+
+typedef enum {
+    BOOL,
+    STRING,
+    OBJECT_TYPE,
+    OBJECT_HASH,
+    ARG_END,
+
+    NUM_ARG_TYPES, // Keep at end, _Static_assert's depend on it
+} command_arg_typ_t;
+
+typedef struct {
+    const char *name;
+    void *data;
+    command_arg_typ_t typ;
+} command_arg_t;
+
+typedef struct command_t {
+    char *name;
+    command_arg_t *args;
+    int (*func)(struct command_t *cmd, const char *program, int argc, char **argv);
+} command_t;
+
+int help_command(command_t *command, const char *program, int argc, char **argv);
 
 
 typedef struct {
@@ -105,7 +135,7 @@ bool read_object(char *hash, uint8_t **data, long *size) {
     }
     char *objects_dir = ".git/objects";
     if (sprintf(object_path, "%s/xx/%38s", objects_dir, hash + 2) == -1) {
-        ZLIB_UNREACHABLE();
+        GIT_UNREACHABLE();
         return_defer(false);
     }
     object_path[strlen(objects_dir)+1] = hash[0];
@@ -139,7 +169,10 @@ defer:
     return ret;
 }
 
-int init_command(const char *program, int argc, char *argv[]) {
+int init_command(command_t *command, const char *program, int argc, char *argv[]) {
+    /* FIXME make an arg string? */
+    (void)command;
+    (void)program;
     int dir_fd = AT_FDCWD;
     char *dir = NULL;
     if (argc > 0) {
@@ -205,16 +238,57 @@ typedef enum {
     NUM_OBJECTS, // Keep at end, _Static_assert's depend on it
 } git_object_t;
 
-int cat_file_command(const char *program, int argc, char *argv[]) {
+
+void parse_args(command_arg_t *args, int argc, char **argv) {
+    for (int i = 0; i < argc; ++ i) {
+        command_arg_t *arg_p = args;
+        while (arg_p->typ != ARG_END) {
+            bool match = false;
+            if (arg_p->name && strcmp(arg_p->name, argv[i]) == 0) {
+                match = true;
+                break;
+            } else if (arg_p->name == NULL && arg_p->data == NULL) {
+                match = true;
+            }
+            if (match) {
+                _Static_assert(NUM_ARG_TYPES == 5, "Arg type have changed. May need handling here");
+                switch (arg_p->typ) {
+                    case BOOL:
+                        arg_p->data = (void *)true;
+                        break;
+
+                    case STRING:
+                    case OBJECT_TYPE:
+                    case OBJECT_HASH:
+
+                    default:
+                        GIT_UNREACHABLE();
+                        return;
+                }
+                break;
+            }
+            arg_p ++;
+        }
+    }
+}
+
+command_arg_t cat_file_args[] = {
+    { .name = "-p", .typ = BOOL },
+    { .name = "-t", .typ = BOOL },
+    { .typ = OBJECT_TYPE },
+    { .typ = OBJECT_HASH },
+    { .typ = ARG_END }, // End of list
+};
+int cat_file_command(command_t *command, const char *program, int argc, char *argv[]) {
     int ret = 0;
     uint8_t *data = NULL;
 #define return_defer(code) do { ret = (code); goto defer; } while (0);
 #define usage() do { \
-    fprintf(stderr, "usage: %s cat-file (-p|-t) <sha1-hash>\n", program); \
+    char *help_argv[] = { command->name }; \
+    help_command(NULL, program, 1, help_argv); \
 } while (0)
 
     if (argc <= 0) {
-        usage();
         return_defer(1);
     }
     bool pretty = false;
@@ -319,13 +393,13 @@ int cat_file_command(const char *program, int argc, char *argv[]) {
 
         case BLOB:
             assert(size == (char*)(data + filesize) - header_end - 1);
-            assert(fwrite(header_end + 1, 1, size, stdout) == size);
+            assert(fwrite(header_end + 1, 1, size, stdout) == (size_t)size);
             break;
 
         case TREE: {
             assert(size == (char*)(data + filesize) - header_end - 1);
             if (type == TREE) {
-                assert(fwrite(header_end + 1, 1, size, stdout) == size);
+                assert(fwrite(header_end + 1, 1, size, stdout) == (size_t)size);
                 return_defer(0);
             }
             char *end = (char *)data + filesize;
@@ -353,7 +427,7 @@ int cat_file_command(const char *program, int argc, char *argv[]) {
                     case S_IFLNK:
                     case S_IFSOCK:
                     default:
-                        ZLIB_UNREACHABLE();
+                        GIT_UNREACHABLE();
                 }
                 SHA1_PRINTF_HEX(hash);
                 printf("    %s\n", file);
@@ -362,7 +436,7 @@ int cat_file_command(const char *program, int argc, char *argv[]) {
 
 
         default:
-            ZLIB_UNREACHABLE();
+            GIT_UNREACHABLE();
             return_defer(1);
     }
 
@@ -397,7 +471,7 @@ bool hash_object(git_object_t type, uint8_t *data, size_t size, uint8_t hash[SHA
             break;
 
         default:
-            ZLIB_UNREACHABLE();
+            GIT_UNREACHABLE();
             return_defer(false);
     }
     object = malloc(objectsize);
@@ -420,7 +494,7 @@ bool hash_object(git_object_t type, uint8_t *data, size_t size, uint8_t hash[SHA
             break;
 
         default:
-            ZLIB_UNREACHABLE();
+            GIT_UNREACHABLE();
             return_defer(false);
     }
     assert(object[headersize] == '\0');
@@ -474,7 +548,7 @@ bool hash_object(git_object_t type, uint8_t *data, size_t size, uint8_t hash[SHA
             fprintf(stderr, "Error while zlib compressing the object\n");
             return_defer(1);
         }
-        assert(write(object_fd, ctx.deflate.out.data, ctx.deflate.out.size) == ctx.deflate.out.size);
+        assert(write(object_fd, ctx.deflate.out.data, ctx.deflate.out.size) == (ssize_t)ctx.deflate.out.size);
     }
 
 #undef return_defer
@@ -485,7 +559,8 @@ defer:
     return ret;
 }
 
-int hash_object_command(const char *program, int argc, char *argv[]) {
+int hash_object_command(command_t *command, const char *program, int argc, char *argv[]) {
+    (void)command;
     int ret = 0;
     FILE *file = NULL;
     uint8_t *filedata = NULL;
@@ -537,7 +612,8 @@ defer:
     return ret;
 }
 
-int ls_tree_command(const char *program, int argc, char *argv[]) {
+int ls_tree_command(command_t *command, const char *program, int argc, char *argv[]) {
+    (void)command;
     int ret = 0;
     uint8_t *data = NULL;
 #define return_defer(code) do { ret = (code); goto defer; } while (0);
@@ -636,7 +712,7 @@ int ls_tree_command(const char *program, int argc, char *argv[]) {
                 case S_IFLNK:
                 case S_IFSOCK:
                 default:
-                    ZLIB_UNREACHABLE();
+                    GIT_UNREACHABLE();
             }
         }
         if (!name_only) {
@@ -688,8 +764,8 @@ bool write_tree(int dir_fd, uint8_t hash[SHA1_DIGEST_BYTE_LENGTH]) {
                 ARRAY_ENSURE(tree_data, 8 + strlen(dirlist[i]->d_name) + SHA1_DIGEST_BYTE_LENGTH);
                 int written = snprintf((char *)tree_data.data + tree_data.size,
                             8 + strlen(dirlist[i]->d_name),
-                            "%06o %s%c",
-                            S_IFDIR,
+                            "%o %s%c",
+                            GIT_DIR_MODE,
                             dirlist[i]->d_name,
                             '\0');
                 assert(written > 0);
@@ -703,8 +779,8 @@ bool write_tree(int dir_fd, uint8_t hash[SHA1_DIGEST_BYTE_LENGTH]) {
                 ARRAY_ENSURE(tree_data, 8 + strlen(dirlist[i]->d_name) + SHA1_DIGEST_BYTE_LENGTH);
                 int written = snprintf((char *)tree_data.data + tree_data.size,
                             8 + strlen(dirlist[i]->d_name),
-                            "%6o %s%c",
-                            ((filestat.st_mode & S_IEXEC) != 0) ? 0100755 : 0100644,
+                            "%o %s%c",
+                            ((filestat.st_mode & S_IEXEC) != 0) ? GIT_EXE_MODE : GIT_FILE_MODE,
                             dirlist[i]->d_name,
                             '\0');
                 assert(written > 0);
@@ -725,10 +801,10 @@ bool write_tree(int dir_fd, uint8_t hash[SHA1_DIGEST_BYTE_LENGTH]) {
             case S_IFLNK:
             case S_IFSOCK:
             default:
-                ZLIB_UNREACHABLE();
+                GIT_UNREACHABLE();
         }
     }
-    /* hexdump(tree_data.data, tree_data.size); */
+    hexdump(tree_data.data, tree_data.size);
     if (tree_data.size == 0) {
         return_defer(false);
     }
@@ -750,12 +826,15 @@ defer:
     return ret;
 }
 
-int write_tree_command(const char *program, int argc, char *argv[]) {
+int write_tree_command(command_t *command, const char *program, int argc, char *argv[]) {
+    (void)command;
+    (void)program;
     int ret = 0;
     int root_fd = AT_FDCWD;
 #define return_defer(code) do { ret = (code); goto defer; } while (0);
     if (argc > 0) {
-        ZLIB_UNIMPLENTED("args for write-tree");
+        (void)argv;
+        GIT_UNIMPLENTED("args for write-tree");
         return_defer(1);
     }
     // FIXME in the future, this will parse .git/index (man gitformat-index)
@@ -777,30 +856,90 @@ defer:
     return ret;
 }
 
-int help_command(const char *program, int argc, char **argv);
-
-struct {
-    const char *name;
-    int (*func)(const char *program, int argc, char **argv);
-} commands[] = {
+command_t commands[] = {
     // FIXME order this and do binary chop?
     //       or could hash it for O(1)
-    { .name = "help",        .func = help_command },
-    { .name = "init",        .func = init_command },
-    { .name = "cat-file",    .func = cat_file_command },
-    { .name = "hash-object", .func = hash_object_command },
-    { .name = "ls-tree",     .func = ls_tree_command },
-    { .name = "write-tree",  .func = write_tree_command },
+    {
+        .name = "help",
+        .func = help_command,
+    },
+    {
+        .name = "init",
+        .func = init_command,
+    },
+    {
+        .name = "cat-file",
+        .args = cat_file_args,
+        .func = cat_file_command,
+    },
+    {
+        .name = "hash-object",
+        .func = hash_object_command,
+    },
+    {
+        .name = "ls-tree",
+        .func = ls_tree_command,
+    },
+    {
+        .name = "write-tree",
+        .func = write_tree_command,
+    },
 };
 
-int help_command(const char *program, int argc, char **argv) {
+int help_command(command_t *command, const char *program, int argc, char **argv) {
+    (void)command;
     if (argc < 1) {
-        printf("Usage: ./your_program.sh <command> [<args>]\n");
+        printf("Usage: %s <command> [<args>]\n", program);
         printf("\n");
         printf("Available commands:\n");
         for (size_t i = 0; i < C_ARRAY_LEN(commands); i ++) {
             printf("    %s\n", commands[i].name);
         }
+    } else {
+        const char *command = ARG();
+
+        for (size_t i = 0; i < C_ARRAY_LEN(commands); i ++) {
+            if (strcmp(command, commands[i].name) == 0) {
+                if (commands[i].args) {
+                    printf("Usage: %s %s [<args>]\n", program, command);
+                    printf("\n");
+                    printf("Available args:\n");
+                    command_arg_t *arg_p = commands[i].args;
+                    while (arg_p->typ != ARG_END) {
+                        printf("    ");
+                        _Static_assert(NUM_ARG_TYPES == 5, "Arg type have changed. May need handling here");
+                        switch (arg_p->typ) {
+                            case BOOL:
+                                printf("%s", arg_p->name);
+                                break;
+
+                            case STRING:
+                                printf("%s <string>", arg_p->name);
+                                break;
+
+                            case OBJECT_TYPE:
+                                printf("<type>");
+                                break;
+
+                            case OBJECT_HASH:
+                                printf("<hash>");
+                                break;
+
+                            default:
+                                GIT_UNREACHABLE();
+                                return 1;
+                        }
+                        printf("\n");
+                        arg_p ++;
+                    }
+                } else {
+                    printf("Usage: %s %s [<args>]\n", program, command);
+                }
+                return 0;
+            }
+        }
+
+        fprintf(stderr, "Unknown command %s\n", command);
     }
     return 0;
 }
@@ -814,7 +953,7 @@ int main(int argc, char *argv[]) {
     const char *program = ARG();
 
     if (argc < 1) {
-        help_command(program, argc, argv);
+        help_command(NULL, program, argc, argv);
         return 1;
     }
 
@@ -822,7 +961,7 @@ int main(int argc, char *argv[]) {
 
     for (size_t i = 0; i < C_ARRAY_LEN(commands); i ++) {
         if (strcmp(command, commands[i].name) == 0) {
-            return commands[i].func(program, argc, argv);
+            return commands[i].func(&commands[i], program, argc, argv);
         }
     }
 

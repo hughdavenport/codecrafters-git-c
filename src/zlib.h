@@ -895,7 +895,7 @@ bool inflate(deflate_context *ctx) {
     DEFLATE_APPEND(ctx, (uint8_t)~len);
     DEFLATE_APPEND(ctx, (uint8_t)(~len >> 8));
     DEFLATE_APPEND_BYTES(ctx, ctx->in.data, ctx->in.size);
-    ctx->state = ZLIB_FINISHED;
+    ctx->state = DEFLATE_FINISHED;
     return true;
 }
 
