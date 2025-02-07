@@ -16,8 +16,11 @@
 #define ZLIB_IMPLEMENTATION
 #include "zlib.h"
 
-#define GIT_UNREACHABLE() do { fprintf(stderr, "%s:%d: UNREACHABLE\n", __FILE__, __LINE__); fflush(stderr); abort(); } while (0)
-#define GIT_UNIMPLENTED(fmt, ...) do { fprintf(stderr, "%s:%d: UNIMPLENTED %s: " fmt "\n", __FILE__, __LINE__, __func__, ##__VA_ARGS__); fflush(stderr); abort(); } while (0)
+#include <signal.h>
+#define BREAKPOINT() do { raise(SIGTRAP); } while (false)
+
+#define GIT_UNREACHABLE() do { fprintf(stderr, "%s:%d: UNREACHABLE\n", __FILE__, __LINE__); fflush(stderr); BREAKPOINT(); abort(); } while (0)
+#define GIT_UNIMPLENTED(fmt, ...) do { fprintf(stderr, "%s:%d: UNIMPLENTED %s: " fmt "\n", __FILE__, __LINE__, __func__, ##__VA_ARGS__); fflush(stderr); BREAKPOINT(); abort(); } while (0)
 #define ARG() *argv++; argc--
 
 #define C_ARRAY_LEN(arr) (sizeof((arr))/(sizeof((arr)[0])))
@@ -27,11 +30,14 @@
 #define GIT_FILE_MODE 0100644
 
 typedef enum {
+    ARG_END,
     BOOL,
     STRING,
     OBJECT_TYPE,
     OBJECT_HASH,
-    ARG_END,
+
+    CONFLICT,
+    REQUIRED_IN_ORDER,
 
     NUM_ARG_TYPES, // Keep at end, _Static_assert's depend on it
 } command_arg_typ_t;
@@ -39,8 +45,19 @@ typedef enum {
 typedef struct {
     const char *name;
     void *data;
+    int matched;
     command_arg_typ_t typ;
 } command_arg_t;
+
+#define ARGS(...) (command_arg_t[]) { \
+    __VA_ARGS__, \
+    {0}, \
+}
+
+#define CONFLICTS(...) { .typ = CONFLICT, .data = (void *)ARGS(__VA_ARGS__) }
+#define REQUIRES(...) { .typ = REQUIRED_IN_ORDER, .data = (void *)ARGS(__VA_ARGS__) }
+
+#define FLAG(flagname) { .typ = BOOL, .name = (flagname) }
 
 typedef struct command_t {
     char *name;
@@ -48,8 +65,69 @@ typedef struct command_t {
     int (*func)(struct command_t *cmd, const char *program, int argc, char **argv);
 } command_t;
 
-int help_command(command_t *command, const char *program, int argc, char **argv);
+bool parse_args(command_t *command, int argc, char **argv) {
+    assert(command->args != NULL);
+    command_arg_t *arg_p = NULL;
+    for (size_t i = 0; i < (size_t)argc; ++ i) {
+        bool match = false;
+        for (arg_p = command->args; arg_p->typ != ARG_END; arg_p ++) {
+            _Static_assert(NUM_ARG_TYPES == 7, "Arg type have changed. May need handling here");
+            switch (arg_p->typ) {
+                case BOOL:
+                    if (arg_p->name && strcmp(arg_p->name, argv[i]) == 0) {
+                        arg_p->data = (void *)true;
+                        match = true;
+                    }
+                    break;
 
+                case STRING:
+                    GIT_UNIMPLENTED();
+                    break;
+
+                case OBJECT_TYPE:
+                        /* if (strcmp(argv[i], "blob") == 0) { */
+                        /*     type = BLOB; */
+                        /* } else if (strcmp(argv[i], "tree") == 0) { */
+                        /*     type = TREE; */
+                        /* } else { */
+                        /*     match = false; */
+                        /* } */
+                        /* if (match) { */
+                        /*     // FIXME go and check other args ahead to see if this matches */
+                        /* } */
+                    GIT_UNIMPLENTED();
+                    break;
+
+                case OBJECT_HASH:
+                    GIT_UNIMPLENTED();
+                    break;
+
+                case CONFLICT:
+                    GIT_UNIMPLENTED();
+                    break;
+
+                case REQUIRED_IN_ORDER:
+                    GIT_UNIMPLENTED();
+                    break;
+
+                default:
+                    GIT_UNREACHABLE();
+                    return false;
+            }
+        }
+        if (!match) {
+            assert(arg_p != NULL && arg_p->typ == ARG_END);
+            arg_p->data = (void *)i;
+            return false;
+        }
+    }
+    for (arg_p = command->args; arg_p->typ != ARG_END; arg_p ++);
+    assert(arg_p != NULL && arg_p->typ == ARG_END);
+    arg_p->data = (void *)(size_t)argc;
+    return true;
+}
+
+int help_command(command_t *command, const char *program, int argc, char **argv);
 
 typedef struct {
     size_t size;
@@ -238,55 +316,34 @@ typedef enum {
     NUM_OBJECTS, // Keep at end, _Static_assert's depend on it
 } git_object_t;
 
-
-void parse_args(command_arg_t *args, int argc, char **argv) {
-    for (int i = 0; i < argc; ++ i) {
-        command_arg_t *arg_p = args;
-        while (arg_p->typ != ARG_END) {
-            bool match = false;
-            if (arg_p->name && strcmp(arg_p->name, argv[i]) == 0) {
-                match = true;
-                break;
-            } else if (arg_p->name == NULL && arg_p->data == NULL) {
-                match = true;
-            }
-            if (match) {
-                _Static_assert(NUM_ARG_TYPES == 5, "Arg type have changed. May need handling here");
-                switch (arg_p->typ) {
-                    case BOOL:
-                        arg_p->data = (void *)true;
-                        break;
-
-                    case STRING:
-                    case OBJECT_TYPE:
-                    case OBJECT_HASH:
-
-                    default:
-                        GIT_UNREACHABLE();
-                        return;
-                }
-                break;
-            }
-            arg_p ++;
-        }
-    }
-}
-
-command_arg_t cat_file_args[] = {
-    { .name = "-p", .typ = BOOL },
-    { .name = "-t", .typ = BOOL },
-    { .typ = OBJECT_TYPE },
-    { .typ = OBJECT_HASH },
-    { .typ = ARG_END }, // End of list
-};
+#define cat_file_args ARGS( \
+    REQUIRES( \
+        CONFLICTS( \
+            CONFLICTS(FLAG("-p"), FLAG("-t")), \
+            { .typ = OBJECT_TYPE } \
+        ), \
+        { .typ = OBJECT_HASH } \
+    ) \
+)
 int cat_file_command(command_t *command, const char *program, int argc, char *argv[]) {
     int ret = 0;
     uint8_t *data = NULL;
+    /* assert(cat_file_args[C_ARRAY_LEN(cat_file_args) - 1].typ == ARG_END && */
+    /*         "Last element of the args needs to be {0}"); */
+    /* assert(cat_file_args[C_ARRAY_LEN(cat_file_args) - 1].data == NULL && */
+    /*         "Command is only expected to be run once"); */
 #define return_defer(code) do { ret = (code); goto defer; } while (0);
 #define usage() do { \
     char *help_argv[] = { command->name }; \
     help_command(NULL, program, 1, help_argv); \
 } while (0)
+
+    if (!parse_args(command, argc, argv)) {
+        usage();
+        return_defer(1);
+    }
+
+    BREAKPOINT();
 
     if (argc <= 0) {
         return_defer(1);
@@ -886,6 +943,51 @@ command_t commands[] = {
     },
 };
 
+void print_arg(command_arg_t *arg) {
+    _Static_assert(NUM_ARG_TYPES == 7, "Arg type have changed. May need handling here");
+    switch (arg->typ) {
+        case BOOL:
+            printf("%s", arg->name);
+            break;
+
+        case STRING:
+            printf("%s <string>", arg->name);
+            break;
+
+        case OBJECT_TYPE:
+            printf("<type>");
+            break;
+
+        case OBJECT_HASH:
+            printf("<hash>");
+            break;
+
+        case CONFLICT:
+            printf("(");
+            for (command_arg_t *arg_p = arg->data;
+                    arg_p->typ != ARG_END;
+                    arg_p++) {
+                if (arg_p != arg->data) printf("|");
+                print_arg(arg_p);
+            }
+            printf(")");
+            break;
+
+        case REQUIRED_IN_ORDER:
+            for (command_arg_t *arg_p = arg->data;
+                    arg_p->typ != ARG_END;
+                    arg_p++) {
+                if (arg_p != arg->data) printf(" ");
+                print_arg(arg_p);
+            }
+            break;
+
+        default:
+            GIT_UNREACHABLE();
+            return;
+    }
+}
+
 int help_command(command_t *command, const char *program, int argc, char **argv) {
     (void)command;
     if (argc < 1) {
@@ -907,28 +1009,7 @@ int help_command(command_t *command, const char *program, int argc, char **argv)
                     command_arg_t *arg_p = commands[i].args;
                     while (arg_p->typ != ARG_END) {
                         printf("    ");
-                        _Static_assert(NUM_ARG_TYPES == 5, "Arg type have changed. May need handling here");
-                        switch (arg_p->typ) {
-                            case BOOL:
-                                printf("%s", arg_p->name);
-                                break;
-
-                            case STRING:
-                                printf("%s <string>", arg_p->name);
-                                break;
-
-                            case OBJECT_TYPE:
-                                printf("<type>");
-                                break;
-
-                            case OBJECT_HASH:
-                                printf("<hash>");
-                                break;
-
-                            default:
-                                GIT_UNREACHABLE();
-                                return 1;
-                        }
+                        print_arg(arg_p);
                         printf("\n");
                         arg_p ++;
                     }
