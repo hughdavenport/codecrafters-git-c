@@ -316,6 +316,25 @@ typedef enum {
     NUM_OBJECTS, // Keep at end, _Static_assert's depend on it
 } git_object_t;
 
+// blob blob
+//
+//         ^
+// {
+//  requires
+//     conflicts                 matches (blob #1, blob #2)
+//        conflicts              no match
+//          -p       no
+//          -t       no
+//        type       yes (blob #1, blob #2)
+//     object        yes (blob #1, blob #2)
+//
+// argc
+// 1-  000000000001
+// 2-  0         10
+// 3-  0        100
+// argc 10000000 00000000 00000000 00000000
+// FIXME need assertion that argc <= 32
+//
 #define cat_file_args ARGS( \
     REQUIRES( \
         CONFLICTS( \
@@ -338,12 +357,12 @@ int cat_file_command(command_t *command, const char *program, int argc, char *ar
     help_command(NULL, program, 1, help_argv); \
 } while (0)
 
-    if (!parse_args(command, argc, argv)) {
-        usage();
-        return_defer(1);
-    }
+    /* if (!parse_args(command, argc, argv)) { */
+    /*     usage(); */
+    /*     return_defer(1); */
+    /* } */
 
-    BREAKPOINT();
+    /* BREAKPOINT(); */
 
     if (argc <= 0) {
         return_defer(1);
