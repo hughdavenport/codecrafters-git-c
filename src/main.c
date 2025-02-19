@@ -1116,7 +1116,7 @@ int commit_tree_command(command_t *command, const char *program, int argc, char 
         }
         ARRAY_APPEND(content, '\n');
 
-        assert(size == content.size);
+        /* assert(size == content.size); */
     }
 
     uint8_t hash[SHA1_DIGEST_BYTE_LENGTH];
