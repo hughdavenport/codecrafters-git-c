@@ -10,6 +10,7 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <dirent.h>
+#include <time.h>
 
 #define SHA1_IMPLEMENTATION
 #include "sha1.h"
@@ -134,6 +135,12 @@ typedef struct {
     size_t capacity;
     uint8_t *data;
 } uint8_array_t;
+
+typedef struct {
+    size_t size;
+    size_t capacity;
+    char **data;
+} string_array_t;
 
 #define ARRAY_ENSURE(arr, inc) do { \
     if ((arr).size + (inc) > (arr).capacity) { \
@@ -312,6 +319,7 @@ typedef enum {
     UNKNOWN,
     BLOB,
     TREE,
+    COMMIT,
 
     NUM_OBJECTS, // Keep at end, _Static_assert's depend on it
 } git_object_t;
@@ -365,6 +373,7 @@ int cat_file_command(command_t *command, const char *program, int argc, char *ar
     /* BREAKPOINT(); */
 
     if (argc <= 0) {
+        usage();
         return_defer(1);
     }
     bool pretty = false;
@@ -378,11 +387,13 @@ int cat_file_command(command_t *command, const char *program, int argc, char *ar
         } else if (strcmp(arg, "-t") == 0) {
             showtype = true;
         } else {
-            _Static_assert(NUM_OBJECTS == 3, "Objects have changed. May need handling here");
+            _Static_assert(NUM_OBJECTS == 4, "Objects have changed. May need handling here");
             if (strcmp(arg, "blob") == 0) {
                 type = BLOB;
             } else if (strcmp(arg, "tree") == 0) {
                 type = TREE;
+            } else if (strcmp(arg, "commit") == 0) {
+                type = COMMIT;
             } else {
                 if (*arg == '-') {
                     usage();
@@ -430,7 +441,7 @@ int cat_file_command(command_t *command, const char *program, int argc, char *ar
     char *header_end = NULL;
     long size = 0;
     git_object_t object_type = UNKNOWN;
-    _Static_assert(NUM_OBJECTS == 3, "Objects have changed. May need handling here");
+    _Static_assert(NUM_OBJECTS == 4, "Objects have changed. May need handling here");
     if (filesize > 5 && strncmp((char *)data, "blob ", 5) == 0) {
         object_type = BLOB;
         if (showtype) {
@@ -445,6 +456,13 @@ int cat_file_command(command_t *command, const char *program, int argc, char *ar
             return_defer(0);
         }
         size = strtol((char *)data + 5, &header_end, 10);
+    } else if (filesize > 5 && strncmp((char *)data, "commit ", 7) == 0) {
+        object_type = COMMIT;
+        if (showtype) {
+            printf("commit\n");
+            return_defer(0);
+        }
+        size = strtol((char *)data + 7, &header_end, 10);
     } else {
         fprintf(stderr, "Decompressed data is not a valid object\n");
         return_defer(1);
@@ -460,7 +478,7 @@ int cat_file_command(command_t *command, const char *program, int argc, char *ar
         return_defer(1);
     }
 
-    _Static_assert(NUM_OBJECTS == 3, "Objects have changed. May need handling here");
+    _Static_assert(NUM_OBJECTS == 4, "Objects have changed. May need handling here");
     switch (object_type) {
         case UNKNOWN:
             fprintf(stderr, "Decompressed data is not a valid object\n");
@@ -468,6 +486,7 @@ int cat_file_command(command_t *command, const char *program, int argc, char *ar
             break;
 
         case BLOB:
+        case COMMIT:
             assert(size == (char*)(data + filesize) - header_end - 1);
             assert(fwrite(header_end + 1, 1, size, stdout) == (size_t)size);
             break;
@@ -539,11 +558,15 @@ bool hash_object(git_object_t type, uint8_t *data, size_t size, uint8_t hash[SHA
 
     // type SP size NULL filedata
     long objectsize = size + numlen + 1;
-    _Static_assert(NUM_OBJECTS == 3, "Objects have changed. May need handling here");
+    _Static_assert(NUM_OBJECTS == 4, "Objects have changed. May need handling here");
     switch (type) {
         case BLOB:
         case TREE:
             objectsize += 5;
+            break;
+
+        case COMMIT:
+            objectsize += 7;
             break;
 
         default:
@@ -557,7 +580,7 @@ bool hash_object(git_object_t type, uint8_t *data, size_t size, uint8_t hash[SHA
     }
 
     long headersize = 0;
-    _Static_assert(NUM_OBJECTS == 3, "Objects have changed. May need handling here");
+    _Static_assert(NUM_OBJECTS == 4, "Objects have changed. May need handling here");
     switch (type) {
         case BLOB:
             headersize = snprintf((char *)object, objectsize, "blob %ld", size);
@@ -568,6 +591,12 @@ bool hash_object(git_object_t type, uint8_t *data, size_t size, uint8_t hash[SHA
             headersize = snprintf((char *)object, objectsize, "tree %ld", size);
             assert(headersize == numlen + 5);
             break;
+
+        case COMMIT:
+            headersize = snprintf((char *)object, objectsize, "commit %ld", size);
+            assert(headersize == numlen + 7);
+            break;
+
 
         default:
             GIT_UNREACHABLE();
@@ -749,8 +778,10 @@ int ls_tree_command(command_t *command, const char *program, int argc, char *arg
 
     char *header_end = NULL;
     long size = 0;
-    _Static_assert(NUM_OBJECTS == 3, "Objects have changed. May need handling here");
-    if (filesize <= 5 || strncmp((char *)data, "tree ", 5) != 0) {
+    _Static_assert(NUM_OBJECTS == 4, "Objects have changed. May need handling here");
+    if (filesize > 7 && strncmp((char *)data, "commit ", 7) == 0) {
+        GIT_UNIMPLENTED("Get tree object from commit");
+    } else if (filesize <= 5 || strncmp((char *)data, "tree ", 5) != 0) {
         fprintf(stderr, "Object is not a tree: %s\n", hash);
         return_defer(1);
     }
@@ -932,6 +963,191 @@ defer:
     return ret;
 }
 
+int commit_tree_command(command_t *command, const char *program, int argc, char *argv[]) {
+    int ret = 0;
+    string_array_t parents = {0};
+    string_array_t messages = {0};
+    char *tree = NULL;
+    uint8_array_t content = {0};
+#define return_defer(code) do { ret = (code); goto defer; } while (0);
+#define usage() do { \
+    char *help_argv[] = { command->name }; \
+    help_command(NULL, program, 1, help_argv); \
+} while (0)
+
+    if (argc <= 0) {
+        usage();
+        return_defer(1);
+    }
+
+    while (argc > 0) {
+        char *arg = ARG();
+        if (strcmp(arg, "-p") == 0) {
+            if (argc == 0) {
+                usage();
+                return_defer(1);
+            }
+            arg = ARG();
+            char *parent = strdup(arg);
+            assert(parent != NULL);
+            if (strlen(parent) != SHA1_DIGEST_HEX_LENGTH) {
+                GIT_UNIMPLENTED("Get hash from partial hash");
+            }
+            ARRAY_APPEND(parents, parent);
+        } else if (strcmp(arg, "-m") == 0) {
+            if (argc == 0) {
+                usage();
+                return_defer(1);
+            }
+            arg = ARG();
+            char *message = strdup(arg);
+            assert(message != NULL);
+            ARRAY_APPEND(messages, message);
+        } else if (strcmp(arg, "-F") == 0) {
+            if (argc == 0) {
+                usage();
+                return_defer(1);
+            }
+            char *filename = ARG();
+            FILE *file = fopen(filename, "r");
+            if (file == NULL) {
+                fprintf(stderr, "Could not open file %s for reading\n", filename);
+                return_defer(1);
+            }
+            uint8_t *data;
+            long size;
+            if (!file_read_contents_fp(file, &data, &size)) {
+                fprintf(stderr, "Could read file %s\n", filename);
+                fclose(file);
+                return_defer(1);
+            }
+            ARRAY_APPEND(messages, (char *)data);
+            fclose(file);
+        } else {
+            if (*arg == '-') {
+                usage();
+                return_defer(1);
+            }
+            // FIXME get the hash from an object name (i.e. HEAD)
+            if (tree != NULL) {
+                fprintf(stderr, "Can't have multiple tree's. Already have %s, and also have %s\n", tree, arg);
+                return_defer(1);
+            }
+            tree = strdup(arg);
+            assert(tree != NULL);
+            if (strlen(tree) != SHA1_DIGEST_HEX_LENGTH) {
+                printf("tree = %s, len = %ld\n", tree, strlen(tree));
+                GIT_UNIMPLENTED("Get hash from partial hash");
+            }
+        }
+    }
+
+    if (tree == NULL) {
+        fprintf(stderr, "No tree supplied in command line\n");
+        return_defer(1);
+    }
+
+    if (messages.size == 0) {
+        GIT_UNIMPLENTED("Read message from stdin");
+    }
+
+    if (parents.size > 1) {
+        GIT_UNIMPLENTED("Merge requests");
+    } else {
+        // FIXME unhardcode this
+        char *authorname = "Codecrafters test";
+        char *authoremail = "hugh@davenport.net.nz";
+        char *committername = authorname;
+        char *committeremail = authoremail;
+
+        time_t t = time(NULL);
+        struct tm lt = {0};
+        localtime_r(&t, &lt);
+        int tz = 100 * lt.tm_gmtoff / 60 / 60;
+
+
+        size_t size = strlen("tree ") + SHA1_DIGEST_HEX_LENGTH + 1 +
+            parents.size * (strlen("parent ") + SHA1_DIGEST_HEX_LENGTH + 1) +
+            strlen("author ") + strlen(authorname) + strlen(authoremail) + 21 +
+            strlen("committer ") + strlen(committername) + strlen(committeremail) + 21;
+        for (size_t i = 0; i < messages.size; i ++) {
+            size += 1 + strlen(messages.data[i]);
+        }
+        size ++;
+        ARRAY_ENSURE(content, size);
+
+        char treeline[SHA1_DIGEST_HEX_LENGTH + 7];
+        int length;
+        if ((length = snprintf(treeline, C_ARRAY_LEN(treeline), "tree %s\n", tree)) < 0 || (unsigned)length >= C_ARRAY_LEN(treeline)) {
+            fprintf(stderr, "Error writing tree line\n");
+            return_defer(1);
+        }
+        ARRAY_APPEND_BYTES(content, treeline, length);
+
+        for (size_t i = 0; i < parents.size; i ++) {
+            char parentline[SHA1_DIGEST_HEX_LENGTH + 9];
+            int length;
+            if ((length = snprintf(parentline, C_ARRAY_LEN(parentline), "parent %s\n", parents.data[i])) < 0 || (unsigned)length >= C_ARRAY_LEN(parentline)) {
+                fprintf(stderr, "Error writing parent line %ld\n", i);
+                return_defer(1);
+            }
+            ARRAY_APPEND_BYTES(content, parentline, length);
+        }
+
+        char *author = NULL;
+        if ((length = asprintf(&author, "author %s <%s> %ld %+d\n", authorname, authoremail, t, tz)) < 0 || author == NULL) {
+            fprintf(stderr, "Error writing author line\n");
+            return_defer(1);
+        }
+        ARRAY_APPEND_BYTES(content, author, length);
+        free(author);
+
+        char *committer = NULL;
+        if ((length = asprintf(&committer, "committer %s <%s> %ld %+d\n", committername, committeremail, t, tz)) < 0 || committer == NULL) {
+            fprintf(stderr, "Error writing committer line\n");
+            return_defer(1);
+        }
+        ARRAY_APPEND_BYTES(content, committer, length);
+        free(committer);
+
+        for (size_t i = 0; i < messages.size; i ++) {
+            ARRAY_APPEND(content, '\n');
+            ARRAY_APPEND_BYTES(content, messages.data[i], strlen(messages.data[i]));
+        }
+        ARRAY_APPEND(content, '\n');
+
+        assert(size == content.size);
+    }
+
+    uint8_t hash[SHA1_DIGEST_BYTE_LENGTH];
+    if (!hash_object(COMMIT, content.data, content.size, hash, true)) {
+        fprintf(stderr, "Error hashing commit\n");
+        return_defer(1);
+    }
+
+    SHA1_PRINTF_HEX(hash);
+    printf("\n");
+
+#undef usage
+#undef return_defer
+defer:
+    if (content.data) free(content.data);
+    if (parents.data) {
+        for (size_t i = 0; i < parents.size; i ++) {
+            free(parents.data[i]);
+        }
+        free(parents.data);
+    }
+    if (messages.data) {
+        for (size_t i = 0; i < messages.size; i ++) {
+            free(messages.data[i]);
+        }
+        free(messages.data);
+    }
+    if (tree) free(tree);
+    return ret;
+}
+
 command_t commands[] = {
     // FIXME order this and do binary chop?
     //       or could hash it for O(1)
@@ -959,6 +1175,10 @@ command_t commands[] = {
     {
         .name = "write-tree",
         .func = write_tree_command,
+    },
+    {
+        .name = "commit-tree",
+        .func = commit_tree_command,
     },
 };
 
