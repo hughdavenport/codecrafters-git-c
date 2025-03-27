@@ -355,6 +355,7 @@ uint64_t deflate_next_bytes(deflate_context *ctx, size_t bytes) {
         case 8: return *(uint64_t *)(ctx->bits.data - bytes);
         default: ZLIB_UNREACHABLE();
     }
+    return (uint64_t)-1;
 }
 
 bool _deflate_uncompressed(deflate_context *ctx) {
@@ -392,6 +393,7 @@ bool _deflate_uncompressed(deflate_context *ctx) {
             return false;
     }
     ZLIB_UNREACHABLE();
+    return false;
 }
 
 int _deflate_fixed_compression_code(deflate_context *ctx) {
@@ -668,7 +670,7 @@ bool _deflate_fixed_compression(deflate_context *ctx) {
 bool deflate_dynamic_compression_build_tree(deflate_context *ctx, huffman_tree *tree) {
     // This may need the bits swapped?
     // I was working through this, but turns out the reference implementation uses fixed for my input while stepping through debugger
-    ZLIB_UNIMPLENTED("");(void)ctx;(void)tree;
+    ZLIB_UNIMPLENTED("");(void)ctx;(void)tree;return false;
 
     /* uint8_t hlit = deflate_next_bits(ctx, 5); */
     /* uint8_t hdist = deflate_next_bits(ctx, 5); */
